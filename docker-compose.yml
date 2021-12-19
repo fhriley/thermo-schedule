@@ -1,0 +1,10 @@
+version: "3.9"
+services:
+  thermo-schedule:
+    build: .
+    image: thermo-schedule
+    environment:
+      TZ: America/Phoenix
+    volumes:
+      - /zfs/docker/appdata/thermo-schedule:/config
+    restart: always
