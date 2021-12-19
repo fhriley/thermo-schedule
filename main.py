@@ -114,7 +114,7 @@ def _get_active_schedule(us_holidays: holidays.HolidayBase, settings: dict, sche
     mmdd = (dt.month, dt.day)
     sch_idx = bisect.bisect_right(schedule, mmdd, key=lambda xx: xx['start'])
     sch_idx -= 1
-    if (sch_idx == 0 and mmdd < schedule[0]['start']) or sch_idx == len(schedule):
+    if sch_idx == 0 and mmdd < schedule[0]['start']:
         sch_idx -= 1
 
     sched = schedule[sch_idx].get(mode)
