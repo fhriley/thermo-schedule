@@ -1,0 +1,92 @@
+thermostats:
+  - url: http://192.168.1.198
+    schedules:
+      summer:
+        start: 05/01
+        heat:
+          monday: &summer_weekday_heat
+            1500: 64
+            1900: 68
+          tuesday:
+            <<: *summer_weekday_heat
+          wednesday:
+            <<: *summer_weekday_heat
+          thursday:
+            <<: *summer_weekday_heat
+          friday:
+            <<: *summer_weekday_heat
+          saturday: &summer_weekend_heat
+            530: 68
+            2000: 68
+          sunday:
+            <<: *summer_weekend_heat
+          holiday:
+            <<: *summer_weekend_heat
+        cool:
+          monday: &summer_weekday_cool
+            1500: 86
+            1900: 74
+          tuesday:
+            <<: *summer_weekday_cool
+          wednesday:
+            <<: *summer_weekday_cool
+          thursday:
+            <<: *summer_weekday_cool
+          friday:
+            <<: *summer_weekday_cool
+          saturday: &summer_weekend_cool
+            530: 78
+            2000: 74
+          sunday:
+            <<: *summer_weekend_cool
+          holiday:
+            <<: *summer_weekend_cool
+      winter:
+        start: 10/01
+        heat:
+          monday: &winter_weekday_heat
+            530: 68
+            600: 64
+            900: 68
+            1800: 64
+            2100: 65
+          tuesday:
+            <<: *winter_weekday_heat
+          wednesday:
+            <<: *winter_weekday_heat
+          thursday:
+            <<: *winter_weekday_heat
+          friday:
+            <<: *winter_weekday_heat
+          saturday: &winter_weekend_heat
+            530: 68
+            2000: 65
+          sunday:
+            <<: *winter_weekend_heat
+          holiday:
+            <<: *winter_weekend_heat
+        cool:
+          monday: &winter_weekday_cool
+            600: 86
+            900: 74
+            1800: 86
+            2100: 74
+          tuesday:
+            <<: *winter_weekday_cool
+          wednesday:
+            <<: *winter_weekday_cool
+          thursday:
+            <<: *winter_weekday_cool
+          friday:
+            <<: *winter_weekday_cool
+          saturday: &winter_weekend_cool
+            530: 78
+            2000: 74
+          sunday:
+            <<: *winter_weekend_cool
+          holiday:
+            <<: *winter_weekend_cool
+
+settings:
+  interval: 10
+  holidays: ["new year", "thanksgiving", "christmas"]
