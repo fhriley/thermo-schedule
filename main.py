@@ -107,7 +107,7 @@ def _is_holiday(us_holidays: holidays.HolidayBase, settings: dict, dt: datetime.
 
 
 def _get_active_schedule(us_holidays: holidays.HolidayBase, settings: dict, schedule: [dict],
-                         dt: datetime.datetime, mode: str) -> Optional[float]:
+                         dt: datetime.datetime, mode: str) -> Optional[dict]:
     if not schedule:
         return
 
@@ -141,15 +141,44 @@ def _get_active_schedule(us_holidays: holidays.HolidayBase, settings: dict, sche
             day = sched['holiday']
         else:
             day = sched['days'][weekday]
-        return _to_celsius(day[-1].temperature)
+        return {
+            'id': (sch_idx, mode, weekday, day[-1].time, day[-1].temperature),
+            'temp': _to_celsius(day[-1].temperature),
+        }
 
     ii = bisect.bisect_right(day, time, key=lambda xx: xx.time) - 1
-    return _to_celsius(day[ii].temperature)
+    return {
+        'id': (sch_idx, mode, weekday, day[ii].time, day[ii].temperature),
+        'temp': _to_celsius(day[ii].temperature),
+    }
 
+
+def _equiv_temps(left, right):
+    return round(left * 10) == round(right * 10)
+
+
+async def _set_temp(session: aiohttp.ClientSession, uri: str, data: dict):
+    retries = 3
+    while retries > 0:
+        await http_post(session, uri, '/control', data)
+        await asyncio.sleep(3)
+        resp = await http_get(session, uri, '/query/info')
+        mode = data['mode']
+        if mode == 1:
+            key = 'heattemp'
+        elif mode == 2:
+            key = 'cooltemp'
+        else:
+            raise Exception(f'invalid mode: {mode}')
+        if _equiv_temps(resp[key], data[key]):
+            return
+        retries -= 1
+    raise Exception('failed to set new state')
 
 async def thermo_task(log: logging.Logger, schedule: dict, settings: dict, uri: str):
     us_holidays = holidays.UnitedStates(observed=True)
     interval = settings.get('interval', 10)
+    state = None
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -174,32 +203,33 @@ async def thermo_task(log: logging.Logger, schedule: dict, settings: dict, uri: 
                         raise Exception(f'invalid mode: {mode}')
 
                     now = datetime.datetime.now()
-                    temp = _get_active_schedule(us_holidays, settings, schedule, now, mode_str)
-                    if temp is None:
+                    new_sched = _get_active_schedule(us_holidays, settings, schedule, now, mode_str)
+                    if new_sched is None:
                         log.debug('no schedule set')
                         break
 
                     if mode_str == 'heat':
                         check = 'heattemp'
-                        heattemp = temp
+                        heattemp = new_sched['temp']
                         cooltemp = resp['cooltemp']
                     elif mode_str == 'cool':
                         check = 'cooltemp'
                         heattemp = resp['heattemp']
-                        cooltemp = temp
+                        cooltemp = new_sched['temp']
 
                     log.debug(f'mode={mode_str} check={check} heattemp={heattemp}({_to_fahrenheit(heattemp)}) '
                               f'cooltemp={cooltemp}({_to_fahrenheit(cooltemp)})')
 
-                    if round(resp[check] * 10) != round(temp * 10):
+                    if state != new_sched['id']:
                         data = dict(mode=mode, fan=resp['fan'], heattemp=heattemp, cooltemp=cooltemp)
-                        await http_post(session, uri, '/control', data)
+                        await _set_temp(session, uri, data)
                         log.info(
                             f'updated thermostat: mode={mode_str} fan={data["fan"]} '
                             f'heattemp={heattemp}({_to_fahrenheit(heattemp)}) '
                             f'cooltemp={cooltemp}({_to_fahrenheit(cooltemp)})')
+                        state = new_sched['id']
                     else:
-                        log.debug('temp is already set to desired')
+                        log.debug('already in the desired state')
                 except Exception:
                     log.exception('unknown failure')
                 break
