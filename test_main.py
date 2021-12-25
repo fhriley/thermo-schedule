@@ -43,5 +43,5 @@ class Test(TestCase):
         ]
         for ii, tt in enumerate(tests):
             dt, mode, result = tt
-            temp = _get_active_schedule(us_holidays, settings, schedule[0]['schedule'], dt, mode)
-            self.assertAlmostEqual(temp, result, 2, f'test {ii} failed')
+            new_sched = _get_active_schedule(us_holidays, settings, schedule[0]['schedule'], dt, mode)
+            self.assertAlmostEqual(new_sched['temp'], result, 2, f'test {ii} failed')
