@@ -221,7 +221,9 @@ async def thermo_task(log: logging.Logger, schedule: dict, settings: dict, uri: 
                               f'cooltemp={cooltemp}({_to_fahrenheit(cooltemp)})')
 
                     if state != new_sched['id']:
-                        data = dict(mode=mode, fan=resp['fan'], heattemp=heattemp, cooltemp=cooltemp)
+                        # 0 == idle
+                        fan = 0 if resp['state'] == 0 else resp['fan']
+                        data = dict(mode=mode, fan=fan, heattemp=heattemp, cooltemp=cooltemp)
                         await _set_temp(session, uri, data)
                         log.info(
                             f'updated thermostat: mode={mode_str} fan={data["fan"]} '
