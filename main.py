@@ -158,10 +158,10 @@ def _equiv_temps(left, right):
 
 
 async def _set_temp(session: aiohttp.ClientSession, uri: str, data: dict):
-    retries = 3
+    retries = 6
     while retries > 0:
         await http_post(session, uri, '/control', data)
-        await asyncio.sleep(3)
+        await asyncio.sleep(10)
         resp = await http_get(session, uri, '/query/info')
         mode = data['mode']
         if mode == 1:
