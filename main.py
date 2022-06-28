@@ -11,16 +11,6 @@ import aiohttp
 import holidays
 
 
-def _to_celsius(fahrenheit: float) -> float:
-    cc = (fahrenheit - 32) * 5 / 9
-    # round to nearest 0.5
-    return round(cc * 2) / 2
-
-
-def _to_fahrenheit(celsius: float) -> float:
-    return celsius * 9 / 5 + 32
-
-
 class Temperature:
     def __init__(self, hhmm, temp):
         self._hhmm = datetime.time(hhmm // 100, hhmm % 100)
@@ -143,13 +133,13 @@ def _get_active_schedule(us_holidays: holidays.HolidayBase, settings: dict, sche
             day = sched['days'][weekday]
         return {
             'id': (sch_idx, mode, weekday, day[-1].time, day[-1].temperature),
-            'temp': _to_celsius(day[-1].temperature),
+            'temp': day[-1].temperature,
         }
 
     ii = bisect.bisect_right(day, time, key=lambda xx: xx.time) - 1
     return {
         'id': (sch_idx, mode, weekday, day[ii].time, day[ii].temperature),
-        'temp': _to_celsius(day[ii].temperature),
+        'temp': day[ii].temperature,
     }
 
 
@@ -174,6 +164,7 @@ async def _set_temp(session: aiohttp.ClientSession, uri: str, data: dict):
             return
         retries -= 1
     raise Exception('failed to set new state')
+
 
 async def thermo_task(log: logging.Logger, schedule: dict, settings: dict, uri: str):
     us_holidays = holidays.UnitedStates(observed=True)
@@ -217,18 +208,18 @@ async def thermo_task(log: logging.Logger, schedule: dict, settings: dict, uri: 
                         heattemp = resp['heattemp']
                         cooltemp = new_sched['temp']
 
-                    log.debug(f'mode={mode_str} check={check} heattemp={heattemp}({_to_fahrenheit(heattemp)}) '
-                              f'cooltemp={cooltemp}({_to_fahrenheit(cooltemp)})')
+                    log.debug(f'mode={mode_str} check={check} heattemp={heattemp} '
+                              f'cooltemp={cooltemp}')
 
                     if state != new_sched['id']:
                         # 0 == idle
                         fan = 0 if resp['state'] == 0 else resp['fan']
                         data = dict(mode=mode, heattemp=heattemp, cooltemp=cooltemp)
-                        await _set_temp(session, uri, data)
                         log.info(
-                            f'updated thermostat: mode={mode_str} '
-                            f'heattemp={heattemp}({_to_fahrenheit(heattemp)}) '
-                            f'cooltemp={cooltemp}({_to_fahrenheit(cooltemp)})')
+                            f'updating thermostat: mode={mode_str} '
+                            f'heattemp={heattemp} '
+                            f'cooltemp={cooltemp}')
+                        await _set_temp(session, uri, data)
                         state = new_sched['id']
                     else:
                         log.debug('already in the desired state')
@@ -247,6 +238,7 @@ async def main():
     tasks = [loop.create_task(thermo_task(log, thermo['schedule'], settings, thermo['url']))
              for thermo in thermostats]
     await asyncio.gather(*tasks)
+
 
 if __name__ == "__main__":
     logging.basicConfig(format='%(levelname)s:%(asctime)s:%(message)s', level=logging.WARNING)
