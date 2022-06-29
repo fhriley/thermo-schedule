@@ -209,7 +209,7 @@ async def thermo_task(log: logging.Logger, schedule: dict, settings: dict, uri: 
                         cooltemp = new_sched['temp']
 
                     log.debug(f'mode={mode_str} check={check} heattemp={heattemp} '
-                              f'cooltemp={cooltemp}')
+                              f'cooltemp={cooltemp} state={state} new_state={new_sched["id"]}')
 
                     if state != new_sched['id']:
                         # 0 == idle
