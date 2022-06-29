@@ -5,6 +5,7 @@ services:
     image: thermo-schedule
     environment:
       TZ: America/Phoenix
+      LOGLEVEL: INFO
     volumes:
       - /zfs/docker/appdata/thermo-schedule:/config
     restart: always
