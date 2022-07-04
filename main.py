@@ -1,7 +1,6 @@
 import bisect
 import datetime
 import logging
-import math
 import os
 from time import sleep
 from typing import Optional, Tuple
@@ -11,6 +10,9 @@ import holidays
 import requests
 import yaml
 from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.triggers.combining import OrTrigger
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 
 
 class Temperature:
@@ -166,7 +168,6 @@ def _set_temp(log: logging.Logger, uri: str, data: dict):
         if _equiv_temps(resp[key], data[key]):
             return
 
-
         tries -= 1
     raise Exception('failed to set new state')
 
@@ -249,26 +250,27 @@ def main():
     log = logging.getLogger('thermo')
     log.setLevel(getattr(logging, os.environ.get('LOGLEVEL', 'INFO')))
     thermostats, settings = load_schedule(os.environ.get('SCHEDULE', '/config/schedule.yaml'))
-    interval_secs = settings.get('interval', 60)
+    interval_secs_requested = min(int(settings.get('interval', 60)), 60)
+    interval_secs = 60 // int(round(60 / interval_secs_requested))
 
-    now = datetime.datetime.now().timestamp()
-    next_invoke = int(math.ceil(now) + (interval_secs - 1)) // interval_secs * interval_secs
-    start_date = datetime.datetime.fromtimestamp(next_invoke)
+    if interval_secs_requested != interval_secs:
+        log.warning(f'interval was adjusted to {interval_secs}')
+
+    if interval_secs < 60:
+        cron = CronTrigger(second=f'*/{interval_secs}')
+    else:
+        cron = CronTrigger(minute='*')
+
+    trigger = OrTrigger([DateTrigger(), cron])
 
     scheduler = BlockingScheduler({
         'apscheduler.job_defaults.coalesce': 'true',
         'apscheduler.job_defaults.max_instances': '1',
-        'apscheduler.executors.default': {
-            'class': 'apscheduler.executors.pool:ThreadPoolExecutor',
-            'max_workers': '1',
-        },
-        'apscheduler.timezone': os.getenv('TZ', 'UTC'),
     })
 
     for thermo in thermostats:
         data = Data(log, thermo, settings)
-        scheduler.add_job(lambda: thermo_task(data), 'date')
-        scheduler.add_job(lambda: thermo_task(data), 'interval', seconds=interval_secs, start_date=start_date)
+        scheduler.add_job(lambda: thermo_task(data), trigger)
 
     scheduler.start()
 
