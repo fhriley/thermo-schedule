@@ -8,10 +8,18 @@ class Test(TestCase):
     def test__is_holiday(self):
         us_holidays = holidays.UnitedStates(observed=True)
         schedule, settings = load_schedule('test.yaml')
-        self.assertFalse(_is_holiday(us_holidays, settings, datetime(2021, 11, 11)))
+        year = datetime.now().year
+        self.assertTrue(_is_holiday(us_holidays, settings, datetime(2022, 5, 30)))
+        self.assertTrue(_is_holiday(us_holidays, settings, datetime(2022, 9, 5)))
+        self.assertFalse(_is_holiday(us_holidays, settings, datetime(2022, 7, 3)))
+        self.assertTrue(_is_holiday(us_holidays, settings, datetime(2022, 7, 4)))
+        self.assertFalse(_is_holiday(us_holidays, settings, datetime(2022, 11, 11)))
         self.assertTrue(_is_holiday(us_holidays, settings, datetime(2021, 11, 25)))
-        self.assertFalse(_is_holiday(us_holidays, settings, datetime(2021, 12, 25)))
         self.assertTrue(_is_holiday(us_holidays, settings, datetime(2021, 12, 24)))
+        self.assertFalse(_is_holiday(us_holidays, settings, datetime(2021, 12, 25)))
+        self.assertFalse(_is_holiday(us_holidays, settings, datetime(2022, 12, 25)))
+        self.assertTrue(_is_holiday(us_holidays, settings, datetime(2022, 12, 26)))
+        self.assertTrue(_is_holiday(us_holidays, settings, datetime(2023, 12, 25)))
 
     def test__get_active_schedule(self):
         us_holidays = holidays.UnitedStates(observed=True)

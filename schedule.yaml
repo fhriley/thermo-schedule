@@ -89,4 +89,4 @@ thermostats:
 
 settings:
   interval: 10
-  holidays: ["new year", "thanksgiving", "christmas"]
+  holidays: ["new year", "memorial day", "labor day", "independence day", "thanksgiving", "christmas"]
