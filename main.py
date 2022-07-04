@@ -129,14 +129,31 @@ def _equiv_temps(left, right):
     return round(left * 10) == round(right * 10)
 
 
-def _set_temp(uri: str, data: dict):
+def _set_temp(log: logging.Logger, uri: str, data: dict):
     tries = 3
     while tries > 0:
-        resp = requests.post(urljoin(uri, '/control'), data=data)
-        resp.raise_for_status()
+        try:
+            resp = requests.post(urljoin(uri, '/control'), data=data)
+            resp.raise_for_status()
+        except Exception as exc:
+            if tries == 1:
+                raise Exception(f'failed to set new state: {exc}')
+            log.error(f'failure in _set_temp, will retry: %s', exc)
+            sleep(3)
+            tries -= 1
+            continue
+
         sleep(3)
-        resp = requests.get(urljoin(uri, '/query/info'))
-        resp.raise_for_status()
+
+        try:
+            resp = requests.get(urljoin(uri, '/query/info'))
+            resp.raise_for_status()
+        except Exception as exc:
+            if tries == 1:
+                raise Exception(f'failed to set new state: {exc}')
+            log.error(f'failure in _set_temp, will retry: %s', exc)
+            tries -= 1
+            continue
 
         resp = resp.json()
         mode = data['mode']
@@ -148,6 +165,8 @@ def _set_temp(uri: str, data: dict):
             raise Exception(f'invalid mode: {mode}')
         if _equiv_temps(resp[key], data[key]):
             return
+
+
         tries -= 1
     raise Exception('failed to set new state')
 
@@ -218,7 +237,7 @@ def thermo_task(data: Data):
                 f'heattemp={heattemp} '
                 f'cooltemp={cooltemp} '
                 f'is_holiday={is_holiday}')
-            _set_temp(data.uri, api_data)
+            _set_temp(data.log, data.uri, api_data)
             data.state = new_sched['id']
         else:
             data.log.debug('already in the desired state')
@@ -239,6 +258,10 @@ def main():
     scheduler = BlockingScheduler({
         'apscheduler.job_defaults.coalesce': 'true',
         'apscheduler.job_defaults.max_instances': '1',
+        'apscheduler.executors.default': {
+            'class': 'apscheduler.executors.pool:ThreadPoolExecutor',
+            'max_workers': '1',
+        },
         'apscheduler.timezone': os.getenv('TZ', 'UTC'),
     })
 
