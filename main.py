@@ -1,14 +1,16 @@
-import os
-import logging
-import asyncio
 import bisect
-from typing import Optional, Tuple
 import datetime
+import logging
+import math
+import os
+from time import sleep
+from typing import Optional, Tuple
 from urllib.parse import urljoin
 
-import yaml
-import aiohttp
 import holidays
+import requests
+import yaml
+from apscheduler.schedulers.blocking import BlockingScheduler
 
 
 class Temperature:
@@ -57,29 +59,6 @@ def load_schedule(path: str) -> Tuple[list, dict]:
             arr.append(sched)
         ret.append({'url': thermostat.get('url'), 'schedule': sorted(arr, key=lambda xx: xx['start'])})
     return ret, schedule.get('settings', {})
-
-
-async def check_error(response: aiohttp.ClientResponse) -> dict:
-    if response.status != 200:
-        raise Exception(f'POST to {response.url} failed: {response.status}')
-    body = await response.json()
-    if body.get('error'):
-        raise Exception(f"POST to {response.url} failed: {body['reason']}")
-    return body
-
-
-async def http_get(session: aiohttp.ClientSession, uri: str, endpoint: str, timeout: float = 5) -> dict:
-    full_uri = urljoin(uri, endpoint)
-    async with session.get(full_uri, timeout=timeout) as response:
-        return await check_error(response)
-
-
-async def http_post(session: aiohttp.ClientSession, uri: str, endpoint: str, data: dict, timeout: float = 5) -> dict:
-    full_uri = urljoin(uri, endpoint)
-    async with session.post(full_uri, data=data,
-                            headers={'Content-Type': 'application/x-www-form-urlencoded'},
-                            timeout=timeout) as response:
-        return await check_error(response)
 
 
 def _is_holiday(us_holidays: holidays.HolidayBase, settings: dict, dt: datetime.datetime):
@@ -150,12 +129,16 @@ def _equiv_temps(left, right):
     return round(left * 10) == round(right * 10)
 
 
-async def _set_temp(session: aiohttp.ClientSession, uri: str, data: dict):
-    retries = 6
-    while retries > 0:
-        await http_post(session, uri, '/control', data)
-        await asyncio.sleep(10)
-        resp = await http_get(session, uri, '/query/info')
+def _set_temp(uri: str, data: dict):
+    tries = 3
+    while tries > 0:
+        resp = requests.post(urljoin(uri, '/control'), data=data)
+        resp.raise_for_status()
+        sleep(3)
+        resp = requests.get(urljoin(uri, '/query/info'))
+        resp.raise_for_status()
+
+        resp = resp.json()
         mode = data['mode']
         if mode == 1:
             key = 'heattemp'
@@ -165,88 +148,108 @@ async def _set_temp(session: aiohttp.ClientSession, uri: str, data: dict):
             raise Exception(f'invalid mode: {mode}')
         if _equiv_temps(resp[key], data[key]):
             return
-        retries -= 1
+        tries -= 1
     raise Exception('failed to set new state')
 
 
-async def thermo_task(log: logging.Logger, schedule: dict, settings: dict, uri: str):
+class Data:
+    def __init__(self, log, thermo, settings):
+        self.log: logging.Logger = log
+        self.schedule: dict = thermo['schedule']
+        self.settings: dict = settings
+        self.uri: str = thermo['url']
+        self.interval_secs = settings.get('interval', 60)
+        self.state: tuple = ()
+
+
+def thermo_task(data: Data):
+    if data.log.isEnabledFor(logging.DEBUG):
+        data.log.debug('starting thermo task')
+
     us_holidays = holidays.UnitedStates(observed=True)
-    interval = settings.get('interval', 10)
-    state = None
 
-    async with aiohttp.ClientSession() as session:
-        while True:
-            log.debug('starting iteration')
+    # noinspection PyBroadException
+    try:
+        resp = requests.get(urljoin(data.uri, '/query/info'))
+        resp.raise_for_status()
 
-            while True:
-                # noinspection PyBroadException
-                try:
-                    resp = await http_get(session, uri, '/query/info')
-                    log.debug('%s', resp)
+        resp = resp.json()
+        data.log.debug('%s', resp)
 
-                    mode = resp['mode']
-                    # Don't do anything if the schedule is on or the mode is off or auto
-                    if resp['schedule'] or mode in (0, 3):
-                        break
+        mode = resp['mode']
+        # Don't do anything if the schedule is on or the mode is off or auto
+        if resp['schedule'] or mode in (0, 3):
+            return
 
-                    if mode == 1:
-                        mode_str = 'heat'
-                    elif mode == 2:
-                        mode_str = 'cool'
-                    else:
-                        raise Exception(f'invalid mode: {mode}')
+        if mode == 1:
+            mode_str = 'heat'
+        elif mode == 2:
+            mode_str = 'cool'
+        else:
+            raise Exception(f'invalid mode: {mode}')
 
-                    now = datetime.datetime.now()
-                    new_sched = _get_active_schedule(us_holidays, settings, schedule, now, mode_str)
-                    if new_sched is None:
-                        log.debug('no schedule set')
-                        break
+        now = datetime.datetime.now()
+        new_sched = _get_active_schedule(us_holidays, data.settings, data.schedule, now, mode_str)
+        if new_sched is None:
+            data.log.debug('no schedule set')
+            return
 
-                    is_holiday = new_sched['is_holiday']
+        is_holiday = new_sched['is_holiday']
 
-                    if mode_str == 'heat':
-                        check = 'heattemp'
-                        heattemp = new_sched['temp']
-                        cooltemp = resp['cooltemp']
-                    elif mode_str == 'cool':
-                        check = 'cooltemp'
-                        heattemp = resp['heattemp']
-                        cooltemp = new_sched['temp']
+        if mode_str == 'heat':
+            check = 'heattemp'
+            heattemp = new_sched['temp']
+            cooltemp = resp['cooltemp']
+        elif mode_str == 'cool':
+            check = 'cooltemp'
+            heattemp = resp['heattemp']
+            cooltemp = new_sched['temp']
+        else:
+            raise Exception('invalid mode_str: ' + mode_str)
 
-                    log.debug(f'mode={mode_str} check={check} heattemp={heattemp} '
-                              f'cooltemp={cooltemp} state={state} new_state={new_sched["id"]} '
-                              f'is_holiday={is_holiday}')
+        data.log.debug(f'mode={mode_str} check={check} heattemp={heattemp} '
+                       f'cooltemp={cooltemp} state={data.state} new_state={new_sched["id"]} '
+                       f'is_holiday={is_holiday}')
 
-                    if state != new_sched['id']:
-                        # 0 == idle
-                        fan = 0 if resp['state'] == 0 else resp['fan']
-                        data = dict(mode=mode, heattemp=heattemp, cooltemp=cooltemp)
-                        log.info(
-                            f'updating thermostat: mode={mode_str} '
-                            f'heattemp={heattemp} '
-                            f'cooltemp={cooltemp} '
-                            f'is_holiday={is_holiday}')
-                        await _set_temp(session, uri, data)
-                        state = new_sched['id']
-                    else:
-                        log.debug('already in the desired state')
-                except Exception:
-                    log.exception('unknown failure')
-                break
-
-            await asyncio.sleep(interval)
+        if data.state != new_sched['id']:
+            api_data = dict(mode=mode, heattemp=heattemp, cooltemp=cooltemp)
+            data.log.info(
+                f'updating thermostat: mode={mode_str} '
+                f'heattemp={heattemp} '
+                f'cooltemp={cooltemp} '
+                f'is_holiday={is_holiday}')
+            _set_temp(data.uri, api_data)
+            data.state = new_sched['id']
+        else:
+            data.log.debug('already in the desired state')
+    except Exception:
+        data.log.exception('unknown failure')
 
 
-async def main():
+def main():
     log = logging.getLogger('thermo')
     log.setLevel(getattr(logging, os.environ.get('LOGLEVEL', 'INFO')))
     thermostats, settings = load_schedule(os.environ.get('SCHEDULE', '/config/schedule.yaml'))
-    loop = asyncio.get_event_loop()
-    tasks = [loop.create_task(thermo_task(log, thermo['schedule'], settings, thermo['url']))
-             for thermo in thermostats]
-    await asyncio.gather(*tasks)
+    interval_secs = settings.get('interval', 60)
+
+    now = datetime.datetime.now().timestamp()
+    next_invoke = int(math.ceil(now) + (interval_secs - 1)) // interval_secs * interval_secs
+    start_date = datetime.datetime.fromtimestamp(next_invoke)
+
+    scheduler = BlockingScheduler({
+        'apscheduler.job_defaults.coalesce': 'true',
+        'apscheduler.job_defaults.max_instances': '1',
+        'apscheduler.timezone': os.getenv('TZ', 'UTC'),
+    })
+
+    for thermo in thermostats:
+        data = Data(log, thermo, settings)
+        scheduler.add_job(lambda: thermo_task(data), 'date')
+        scheduler.add_job(lambda: thermo_task(data), 'interval', seconds=interval_secs, start_date=start_date)
+
+    scheduler.start()
 
 
 if __name__ == "__main__":
     logging.basicConfig(format='%(levelname)s:%(asctime)s:%(message)s', level=logging.WARNING)
-    asyncio.run(main())
+    main()

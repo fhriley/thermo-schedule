@@ -88,5 +88,5 @@ thermostats:
             <<: *winter_weekend_cool
 
 settings:
-  interval: 10
+  interval: 30
   holidays: ["new year", "memorial day", "labor day", "independence day", "thanksgiving", "christmas"]
