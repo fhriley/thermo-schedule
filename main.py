@@ -114,7 +114,8 @@ def _get_active_schedule(us_holidays: holidays.HolidayBase, settings: dict, sche
     weekday = dt.weekday()
     time = dt.time()
 
-    if _is_holiday(us_holidays, settings, dt):
+    is_holiday = _is_holiday(us_holidays, settings, dt)
+    if is_holiday:
         day = sched['holiday']
     else:
         day = sched['days'][weekday]
@@ -134,12 +135,14 @@ def _get_active_schedule(us_holidays: holidays.HolidayBase, settings: dict, sche
         return {
             'id': (sch_idx, mode, weekday, day[-1].time, day[-1].temperature),
             'temp': day[-1].temperature,
+            'is_holiday': is_holiday,
         }
 
     ii = bisect.bisect_right(day, time, key=lambda xx: xx.time) - 1
     return {
         'id': (sch_idx, mode, weekday, day[ii].time, day[ii].temperature),
         'temp': day[ii].temperature,
+        'is_holiday': is_holiday,
     }
 
 
@@ -199,6 +202,8 @@ async def thermo_task(log: logging.Logger, schedule: dict, settings: dict, uri: 
                         log.debug('no schedule set')
                         break
 
+                    is_holiday = new_sched['is_holiday']
+
                     if mode_str == 'heat':
                         check = 'heattemp'
                         heattemp = new_sched['temp']
@@ -209,7 +214,8 @@ async def thermo_task(log: logging.Logger, schedule: dict, settings: dict, uri: 
                         cooltemp = new_sched['temp']
 
                     log.debug(f'mode={mode_str} check={check} heattemp={heattemp} '
-                              f'cooltemp={cooltemp} state={state} new_state={new_sched["id"]}')
+                              f'cooltemp={cooltemp} state={state} new_state={new_sched["id"]} '
+                              f'is_holiday={is_holiday}')
 
                     if state != new_sched['id']:
                         # 0 == idle
@@ -218,7 +224,8 @@ async def thermo_task(log: logging.Logger, schedule: dict, settings: dict, uri: 
                         log.info(
                             f'updating thermostat: mode={mode_str} '
                             f'heattemp={heattemp} '
-                            f'cooltemp={cooltemp}')
+                            f'cooltemp={cooltemp} '
+                            f'is_holiday={is_holiday}')
                         await _set_temp(session, uri, data)
                         state = new_sched['id']
                     else:
