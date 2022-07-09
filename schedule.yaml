@@ -59,7 +59,7 @@ thermostats:
           friday:
             <<: *winter_weekday_heat
           saturday: &winter_weekend_heat
-            530: 68
+            630: 68
             2000: 65
           sunday:
             <<: *winter_weekend_heat

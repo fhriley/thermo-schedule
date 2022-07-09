@@ -131,11 +131,11 @@ def _equiv_temps(left, right):
     return round(left * 10) == round(right * 10)
 
 
-def _set_temp(log: logging.Logger, uri: str, data: dict):
+def _set_temp(log: logging.Logger, uri: str, data: dict, timeout: float):
     tries = 3
     while tries > 0:
         try:
-            resp = requests.post(urljoin(uri, '/control'), data=data)
+            resp = requests.post(urljoin(uri, '/control'), data=data, timeout=timeout)
             resp.raise_for_status()
         except Exception as exc:
             if tries == 1:
@@ -148,7 +148,7 @@ def _set_temp(log: logging.Logger, uri: str, data: dict):
         sleep(3)
 
         try:
-            resp = requests.get(urljoin(uri, '/query/info'))
+            resp = requests.get(urljoin(uri, '/query/info'), timeout=timeout)
             resp.raise_for_status()
         except Exception as exc:
             if tries == 1:
@@ -178,7 +178,8 @@ class Data:
         self.schedule: dict = thermo['schedule']
         self.settings: dict = settings
         self.uri: str = thermo['url']
-        self.interval_secs = settings.get('interval', 60)
+        self.interval_secs: float = settings.get('interval', 60)
+        self.timeout: float = settings.get('timeout', 3)
         self.state: tuple = ()
 
 
@@ -190,7 +191,7 @@ def thermo_task(data: Data):
 
     # noinspection PyBroadException
     try:
-        resp = requests.get(urljoin(data.uri, '/query/info'))
+        resp = requests.get(urljoin(data.uri, '/query/info'), timeout=data.timeout)
         resp.raise_for_status()
 
         resp = resp.json()
@@ -238,7 +239,7 @@ def thermo_task(data: Data):
                 f'heattemp={heattemp} '
                 f'cooltemp={cooltemp} '
                 f'is_holiday={is_holiday}')
-            _set_temp(data.log, data.uri, api_data)
+            _set_temp(data.log, data.uri, api_data, data.timeout)
             data.state = new_sched['id']
         else:
             data.log.debug('already in the desired state')
