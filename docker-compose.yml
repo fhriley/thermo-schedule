@@ -2,7 +2,7 @@ version: "3.9"
 services:
   thermo-schedule:
     build: .
-    image: thermo-schedule
+    image: fhriley/thermo-schedule
     environment:
       TZ: America/Phoenix
       LOGLEVEL: INFO
