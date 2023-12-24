@@ -1,5 +1,5 @@
 pyyaml~=6.0
-holidays~=0.14
-requests~=2.28
-apscheduler~=3.9
+holidays~=0.39
+requests~=2.31
+apscheduler~=3.10
 cython ~= 3.0

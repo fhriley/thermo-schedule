@@ -178,9 +178,13 @@ class Data:
         self.schedule: dict = thermo['schedule']
         self.settings: dict = settings
         self.uri: str = thermo['url']
-        self.interval_secs: float = settings.get('interval', 60)
-        self.timeout: float = settings.get('timeout', 3)
+        self.interval_secs = float(settings.get('interval', 60))
+        self.timeout = float(settings.get('timeout', 3))
         self.state: tuple = ()
+        self.fan_mins: float = 0
+        self.last_update: datetime.datetime = None
+        self.fan_mins_per_hour = float(settings.get('fan_mins_per_hour', 0))
+        self.fan_state = 0
 
 
 def thermo_task(data: Data):
@@ -218,29 +222,47 @@ def thermo_task(data: Data):
         is_holiday = new_sched['is_holiday']
 
         if mode_str == 'heat':
-            check = 'heattemp'
             heattemp = new_sched['temp']
             cooltemp = resp['cooltemp']
         elif mode_str == 'cool':
-            check = 'cooltemp'
             heattemp = resp['heattemp']
             cooltemp = new_sched['temp']
         else:
             raise Exception('invalid mode_str: ' + mode_str)
+        
+        last_fan_state = data.fan_state
+        if not data.last_update or now.hour != data.last_update.hour:
+            data.fan_mins = 0
+            data.fan_state = 0
+        else:
+            # NOTE, this should use 'fanstate', but it doesn't seem to actually return the fan state
+            if resp['state'] in (1, 2) or data.fan_state:
+                data.fan_mins += data.interval_secs / 60.0
+        data.last_update = now
 
-        data.log.debug(f'mode={mode_str} check={check} heattemp={heattemp} '
+        fan_state = 0
+        if data.fan_mins_per_hour > 0:
+            remaining = 60 - now.minute
+            todo = max(0, data.fan_mins_per_hour - data.fan_mins)
+            if todo >= remaining:
+                fan_state = 1
+
+        data.log.debug(f'mode={mode_str} heattemp={heattemp} '
                        f'cooltemp={cooltemp} state={data.state} new_state={new_sched["id"]} '
+                       f'fan_state={data.fan_state} new_fan_state={fan_state} '
                        f'is_holiday={is_holiday}')
 
-        if data.state != new_sched['id']:
-            api_data = dict(mode=mode, heattemp=heattemp, cooltemp=cooltemp)
+        if data.state != new_sched['id'] or last_fan_state != fan_state:
+            api_data = dict(mode=mode, heattemp=heattemp, cooltemp=cooltemp, fan=fan_state)
             data.log.info(
                 f'updating thermostat: mode={mode_str} '
                 f'heattemp={heattemp} '
                 f'cooltemp={cooltemp} '
+                f'fan={fan_state} '
                 f'is_holiday={is_holiday}')
             _set_temp(data.log, data.uri, api_data, data.timeout)
             data.state = new_sched['id']
+            data.fan_state = fan_state
         else:
             data.log.debug('already in the desired state')
     except Exception:

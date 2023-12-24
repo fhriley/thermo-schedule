@@ -35,7 +35,7 @@ thermostats:
           friday:
             <<: *summer_weekday_cool
           saturday: &summer_weekend_cool
-            530: 78
+            630: 77
             2000: 74
           sunday:
             <<: *summer_weekend_cool
@@ -45,11 +45,11 @@ thermostats:
         start: 10/01
         heat:
           monday: &winter_weekday_heat
-            530: 68
+            500: 68
             600: 64
             900: 68
             1800: 64
-            2100: 65
+            2100: 66
           tuesday:
             <<: *winter_weekday_heat
           wednesday:
@@ -59,8 +59,8 @@ thermostats:
           friday:
             <<: *winter_weekday_heat
           saturday: &winter_weekend_heat
-            630: 68
-            2000: 65
+            530: 68
+            2000: 66
           sunday:
             <<: *winter_weekend_heat
           holiday:
@@ -80,7 +80,7 @@ thermostats:
           friday:
             <<: *winter_weekday_cool
           saturday: &winter_weekend_cool
-            530: 78
+            530: 77
             2000: 74
           sunday:
             <<: *winter_weekend_cool
@@ -89,4 +89,5 @@ thermostats:
 
 settings:
   interval: 30
-  holidays: ["new year", "memorial day", "labor day", "independence day", "thanksgiving", "christmas"]
+  holidays: ["new year", "memorial day", "labor day", "independence day", "thanksgiving", "christmas"] 
+  fan_mins_per_hour: 10
