@@ -181,7 +181,7 @@ class Data:
         self.interval_secs = float(settings.get('interval', 60))
         self.timeout = float(settings.get('timeout', 3))
         self.state: tuple = ()
-        self.fan_mins: float = 0
+        self.fan_mins = 0.0
         self.last_update: datetime.datetime = None
         self.fan_mins_per_hour = float(settings.get('fan_mins_per_hour', 0))
         self.fan_state = 0
@@ -232,7 +232,7 @@ def thermo_task(data: Data):
         
         last_fan_state = data.fan_state
         if not data.last_update or now.hour != data.last_update.hour:
-            data.fan_mins = 0
+            data.fan_mins = 0.0
             data.fan_state = 0
         else:
             # NOTE, this should use 'fanstate', but it doesn't seem to actually return the fan state
