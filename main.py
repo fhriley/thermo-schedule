@@ -243,9 +243,10 @@ def thermo_task(data: Data):
         fan_state = 0
         if data.fan_mins_per_hour > 0:
             remaining = 60 - now.minute
-            todo = max(0, data.fan_mins_per_hour - data.fan_mins)
-            if todo >= remaining:
-                fan_state = 1
+            if remaining <= data.fan_mins_per_hour:
+                todo = data.fan_mins_per_hour - data.fan_mins
+                if todo > 0:
+                    fan_state = 1
 
         data.log.debug(f'mode={mode_str} heattemp={heattemp} '
                        f'cooltemp={cooltemp} state={data.state} new_state={new_sched["id"]} '
