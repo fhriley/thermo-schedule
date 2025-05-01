@@ -77,6 +77,13 @@ def _is_holiday(us_holidays: holidays.HolidayBase, settings: dict, dt: datetime.
     return False
 
 
+def _is_peak(us_holidays: holidays.HolidayBase, settings: dict, peak: list,  dt: datetime.datetime):
+    comp = dt.time().hour * 100 + dt.time().minute
+    for row in peak:
+        if row['start'] <= comp < row['end']:
+            return not _is_holiday(us_holidays, settings, dt)
+    return False
+
 def _get_active_schedule(us_holidays: holidays.HolidayBase, settings: dict, schedule: [dict],
                          dt: datetime.datetime, mode: str) -> Optional[dict]:
     if not schedule:
@@ -88,6 +95,7 @@ def _get_active_schedule(us_holidays: holidays.HolidayBase, settings: dict, sche
     if sch_idx == 0 and mmdd < schedule[0]['start']:
         sch_idx -= 1
 
+    peak = schedule[sch_idx]['peak']
     sched = schedule[sch_idx].get(mode)
     if not sched:
         return
@@ -106,6 +114,7 @@ def _get_active_schedule(us_holidays: holidays.HolidayBase, settings: dict, sche
         weekday -= 1
         if mmdd == schedule[sch_idx]['start']:
             sch_idx -= 1
+            peak = schedule[sch_idx]['peak']
             sched = schedule[sch_idx].get(mode)
             if not sched:
                 return
@@ -117,6 +126,7 @@ def _get_active_schedule(us_holidays: holidays.HolidayBase, settings: dict, sche
             'id': (sch_idx, mode, weekday, day[-1].time, day[-1].temperature),
             'temp': day[-1].temperature,
             'is_holiday': is_holiday,
+            'is_peak': _is_peak(us_holidays, settings, peak, dt),
         }
 
     ii = bisect.bisect_right(day, time, key=lambda xx: xx.time) - 1
@@ -124,6 +134,7 @@ def _get_active_schedule(us_holidays: holidays.HolidayBase, settings: dict, sche
         'id': (sch_idx, mode, weekday, day[ii].time, day[ii].temperature),
         'temp': day[ii].temperature,
         'is_holiday': is_holiday,
+        'is_peak': _is_peak(us_holidays, settings, peak, dt),
     }
 
 
