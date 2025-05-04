@@ -1,5 +1,5 @@
-pyyaml~=6.0
-holidays~=0.39
-requests~=2.31
-apscheduler~=3.10
-cython ~= 3.0
+pyyaml==6.0.2
+holidays==0.71
+requests==2.32.3
+apscheduler==3.9.1
+influxdb-client==1.48

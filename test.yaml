@@ -3,6 +3,9 @@ thermostats:
     schedules:
       summer:
         start: 05/01
+        peak:
+          - start: 1500
+            end: 1900
         heat:
           monday: &summer_weekday_heat
             1500: 50
@@ -22,6 +25,7 @@ thermostats:
             <<: *summer_weekend_heat
           holiday:
             <<: *summer_weekend_heat
+          peak: 64
         cool:
           monday: &summer_weekday_cool
             1500: 122
@@ -41,8 +45,14 @@ thermostats:
             <<: *summer_weekend_cool
           holiday:
             <<: *summer_weekend_cool
+          peak: 65
       winter:
         start: 10/01
+        peak:
+          - start: 600
+            end: 900
+          - start: 1800
+            end: 2100
         heat:
           monday: &winter_weekday_heat
             600: 194
@@ -62,10 +72,13 @@ thermostats:
             <<: *winter_weekend_heat
           holiday:
             <<: *winter_weekend_heat
+          peak: 67
         cool:
           monday: &winter_weekday_cool
             50: 266
             240: 284
+            1800: 302
+            2100: 284
           tuesday:
             <<: *winter_weekday_cool
           wednesday:
@@ -81,6 +94,7 @@ thermostats:
             <<: *winter_weekend_cool
           holiday:
             <<: *winter_weekend_cool
+          peak: 68
 
 settings:
   interval: 10

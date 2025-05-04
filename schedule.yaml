@@ -3,6 +3,9 @@ thermostats:
     schedules:
       summer:
         start: 05/01
+        peak:
+          - start: 1500
+            end: 1900
         heat:
           monday: &summer_weekday_heat
             1500: 64
@@ -22,6 +25,7 @@ thermostats:
             <<: *summer_weekend_heat
           holiday:
             <<: *summer_weekend_heat
+          peak: 64
         cool:
           monday: &summer_weekday_cool
             1500: 86
@@ -41,8 +45,14 @@ thermostats:
             <<: *summer_weekend_cool
           holiday:
             <<: *summer_weekend_cool
+          peak: 86
       winter:
         start: 10/01
+        peak:
+          - start: 600
+            end: 900
+          - start: 1800
+            end: 2100
         heat:
           monday: &winter_weekday_heat
             500: 68
@@ -65,6 +75,7 @@ thermostats:
             <<: *winter_weekend_heat
           holiday:
             <<: *winter_weekend_heat
+          peak: 64
         cool:
           monday: &winter_weekday_cool
             600: 86
@@ -86,8 +97,14 @@ thermostats:
             <<: *winter_weekend_cool
           holiday:
             <<: *winter_weekend_cool
+          peak: 86
 
 settings:
   interval: 30
-  holidays: ["new year", "memorial day", "labor day", "independence day", "thanksgiving", "christmas"] 
+  holidays: ["new year", "memorial day", "labor day", "independence day", "thanksgiving", "christmas"]
   fan_mins_per_hour: 10
+  influxdb:
+    url: 'http://192.168.1.246:8086'
+    org: 'riley'
+    bucket: 'solar'
+    token: 'fGtcD0fW2nqQZWbPBE92Ro8SQvDIULFRy5A6NplkyLlOPFlM-BfngMd9xmlnUp2nvd9ngWF-sjV7Wc46NcpgAg=='
