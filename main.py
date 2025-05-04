@@ -7,20 +7,13 @@ from typing import Optional, Tuple
 from urllib.parse import urljoin
 
 import holidays
+import influxdb_client
 import requests
 import yaml
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.combining import OrTrigger
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
-
-import influxdb_client
-
-
-SOLAR_PROD_THRESH = {
-    'heat': 1.0,
-    'cool': 4.0,
-}
 
 SOLAR_PROD_QUERY = '''from(bucket: "solar")
       |> range(start: -2h)
@@ -97,7 +90,7 @@ def _is_holiday(us_holidays: holidays.HolidayBase, settings: dict, dt: datetime.
     return False
 
 
-def _is_peak(us_holidays: holidays.HolidayBase, settings: dict, peak: list,  dt: datetime.datetime):
+def _is_peak(us_holidays: holidays.HolidayBase, settings: dict, peak: list, dt: datetime.datetime):
     weekday = dt.weekday()
     if weekday in (5, 6):
         return False
@@ -106,6 +99,7 @@ def _is_peak(us_holidays: holidays.HolidayBase, settings: dict, peak: list,  dt:
         if row['start'] <= comp < row['end']:
             return not _is_holiday(us_holidays, settings, dt)
     return False
+
 
 def _get_active_schedule(us_holidays: holidays.HolidayBase, settings: dict, schedule: [dict],
                          dt: datetime.datetime, mode: str) -> Optional[dict]:
@@ -221,6 +215,7 @@ class Data:
         self.last_update: datetime.datetime = None
         self.fan_mins_per_hour = float(settings.get('fan_mins_per_hour', 0))
         self.fan_state = 0
+        self.solar_prod_thresh: dict = settings.get('solar_prod_thresh') or {}
 
 
 def get_solar_prod(data: Data) -> Optional[float]:
@@ -232,7 +227,7 @@ def get_solar_prod(data: Data) -> Optional[float]:
         result = influxdb['query_api'].query(org=influxdb['org'], query=query)
         for table in result:
             for record in table.records:
-                solar_prod = record.get_value()
+                solar_prod = record.get_value() / 1000.0
                 break
     except Exception:
         data.log.exception('failed to get solar production')
@@ -271,12 +266,12 @@ def thermo_task(data: Data):
             data.log.debug('no schedule set')
             return
 
-        solar_prod_thresh = SOLAR_PROD_THRESH[mode_str]
+        solar_prod_thresh = data.solar_prod_thresh.get(mode_str, 0.0)
 
         solar_prod = get_solar_prod(data)
         if solar_prod is None:
             data.log.warning('solar production not available, setting to 0')
-            solar_prod = 0
+            solar_prod = 0.0
 
         is_holiday = new_sched['is_holiday']
         is_peak = new_sched['is_peak']
@@ -368,7 +363,8 @@ def main():
         scheduler.add_job(lambda: thermo_task(data), trigger)
 
     influxdb = settings['influxdb']
-    client = influxdb_client.InfluxDBClient(url=influxdb['url'], token=influxdb['token'], org=influxdb['org'], verify_ssl=False)
+    client = influxdb_client.InfluxDBClient(url=influxdb['url'], token=influxdb['token'], org=influxdb['org'],
+                                            verify_ssl=False)
     influxdb['query_api'] = client.query_api()
 
     scheduler.start()

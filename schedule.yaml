@@ -103,6 +103,9 @@ settings:
   interval: 30
   holidays: ["new year", "memorial day", "labor day", "independence day", "thanksgiving", "christmas"]
   fan_mins_per_hour: 10
+  solar_prod_thresh:
+    heat: 3.5
+    cool: 1.0
   influxdb:
     url: 'http://192.168.1.246:8086'
     org: 'riley'
