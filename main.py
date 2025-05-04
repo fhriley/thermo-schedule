@@ -14,6 +14,21 @@ from apscheduler.triggers.combining import OrTrigger
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
+import influxdb_client
+
+
+SOLAR_PROD_THRESH = {
+    'heat': 1.0,
+    'cool': 4.0,
+}
+
+SOLAR_PROD_QUERY = '''from(bucket: "solar")
+      |> range(start: -2h)
+      |> filter(fn: (r) => r["_measurement"] == "realtime_energy")
+      |> filter(fn: (r) => r["_field"] == "production")
+      |> timedMovingAverage(every: %ss, period: 10m)
+      |> last()'''
+
 
 class Temperature:
     def __init__(self, hhmm, temp):
@@ -47,7 +62,11 @@ def load_schedule(path: str) -> Tuple[list, dict]:
                 if typ_sched:
                     new = {}
                     holiday = None
+                    peak = None
                     for day, times in typ_sched.items():
+                        if day == 'peak':
+                            peak = times
+                            continue
                         day = day.lower()
                         temps = [Temperature(hhmm, times[hhmm]) for hhmm in sorted(times.keys())]
                         if day == 'holiday':
@@ -58,6 +77,7 @@ def load_schedule(path: str) -> Tuple[list, dict]:
                     if len(sched[typ]['days']) != 7:
                         raise Exception("schedule does not contain all days of the week")
                     sched[typ]['holiday'] = holiday
+                    sched[typ]['peak'] = peak
             arr.append(sched)
         ret.append({'url': thermostat.get('url'), 'schedule': sorted(arr, key=lambda xx: xx['start'])})
     return ret, schedule.get('settings', {})
@@ -78,6 +98,9 @@ def _is_holiday(us_holidays: holidays.HolidayBase, settings: dict, dt: datetime.
 
 
 def _is_peak(us_holidays: holidays.HolidayBase, settings: dict, peak: list,  dt: datetime.datetime):
+    weekday = dt.weekday()
+    if weekday in (5, 6):
+        return False
     comp = dt.time().hour * 100 + dt.time().minute
     for row in peak:
         if row['start'] <= comp < row['end']:
@@ -87,7 +110,7 @@ def _is_peak(us_holidays: holidays.HolidayBase, settings: dict, peak: list,  dt:
 def _get_active_schedule(us_holidays: holidays.HolidayBase, settings: dict, schedule: [dict],
                          dt: datetime.datetime, mode: str) -> Optional[dict]:
     if not schedule:
-        return
+        return None
 
     mmdd = (dt.month, dt.day)
     sch_idx = bisect.bisect_right(schedule, mmdd, key=lambda xx: xx['start'])
@@ -98,7 +121,7 @@ def _get_active_schedule(us_holidays: holidays.HolidayBase, settings: dict, sche
     peak = schedule[sch_idx]['peak']
     sched = schedule[sch_idx].get(mode)
     if not sched:
-        return
+        return None
 
     weekday = dt.weekday()
     time = dt.time()
@@ -109,7 +132,7 @@ def _get_active_schedule(us_holidays: holidays.HolidayBase, settings: dict, sche
     else:
         day = sched['days'][weekday]
 
-    # Handle the case were we are before the first time of a new weekday and/or schedule
+    # Handle the case where we are before the first time of a new weekday and/or schedule
     if time < day[0].time:
         weekday -= 1
         if mmdd == schedule[sch_idx]['start']:
@@ -117,7 +140,7 @@ def _get_active_schedule(us_holidays: holidays.HolidayBase, settings: dict, sche
             peak = schedule[sch_idx]['peak']
             sched = schedule[sch_idx].get(mode)
             if not sched:
-                return
+                return None
         if _is_holiday(us_holidays, settings, dt - datetime.timedelta(days=1)):
             day = sched['holiday']
         else:
@@ -127,6 +150,7 @@ def _get_active_schedule(us_holidays: holidays.HolidayBase, settings: dict, sche
             'temp': day[-1].temperature,
             'is_holiday': is_holiday,
             'is_peak': _is_peak(us_holidays, settings, peak, dt),
+            'peak_temp': sched['peak'],
         }
 
     ii = bisect.bisect_right(day, time, key=lambda xx: xx.time) - 1
@@ -135,6 +159,7 @@ def _get_active_schedule(us_holidays: holidays.HolidayBase, settings: dict, sche
         'temp': day[ii].temperature,
         'is_holiday': is_holiday,
         'is_peak': _is_peak(us_holidays, settings, peak, dt),
+        'peak_temp': sched['peak'],
     }
 
 
@@ -194,6 +219,22 @@ class Data:
         self.state: tuple = ()
 
 
+def get_solar_prod(data: Data) -> Optional[float]:
+    solar_prod = None
+    try:
+        influxdb = data.settings['influxdb']
+        interval = data.settings['interval'] // 2
+        query = SOLAR_PROD_QUERY % interval
+        result = influxdb['query_api'].query(org=influxdb['org'], query=query)
+        for table in result:
+            for record in table.records:
+                solar_prod = record.get_value()
+                break
+    except Exception:
+        data.log.exception('failed to get solar production')
+    return solar_prod
+
+
 def thermo_task(data: Data):
     if data.log.isEnabledFor(logging.DEBUG):
         data.log.debug('starting thermo task')
@@ -226,7 +267,22 @@ def thermo_task(data: Data):
             data.log.debug('no schedule set')
             return
 
+        solar_prod_thresh = SOLAR_PROD_THRESH[mode_str]
+
+        solar_prod = get_solar_prod(data)
+        if solar_prod is None:
+            data.log.warning('solar production not available, setting to 0')
+            solar_prod = 0
+
         is_holiday = new_sched['is_holiday']
+        is_peak = new_sched['is_peak']
+        peak_temp = new_sched['peak_temp']
+
+        if is_peak and solar_prod < solar_prod_thresh:
+            data.log.info(f'solar production is below threshold, changing to peak temp: {peak_temp}')
+            new_sched['temp'] = peak_temp
+
+        new_sched["id"] = new_sched["id"] + (new_sched["temp"],)
 
         if mode_str == 'heat':
             check = 'heattemp'
@@ -241,7 +297,9 @@ def thermo_task(data: Data):
 
         data.log.debug(f'mode={mode_str} check={check} heattemp={heattemp} '
                        f'cooltemp={cooltemp} state={data.state} new_state={new_sched["id"]} '
-                       f'is_holiday={is_holiday}')
+                       f'is_holiday={is_holiday} '
+                       f'is_peak={is_peak} '
+                       f'solar_prod={solar_prod}')
 
         if data.state != new_sched['id']:
             api_data = dict(mode=mode, heattemp=heattemp, cooltemp=cooltemp)
@@ -249,7 +307,9 @@ def thermo_task(data: Data):
                 f'updating thermostat: mode={mode_str} '
                 f'heattemp={heattemp} '
                 f'cooltemp={cooltemp} '
-                f'is_holiday={is_holiday}')
+                f'is_holiday={is_holiday} '
+                f'is_peak={is_peak} '
+                f'solar_prod={solar_prod}')
             _set_temp(data.log, data.uri, api_data, data.timeout)
             data.state = new_sched['id']
         else:
@@ -283,6 +343,10 @@ def main():
     for thermo in thermostats:
         data = Data(log, thermo, settings)
         scheduler.add_job(lambda: thermo_task(data), trigger)
+
+    influxdb = settings['influxdb']
+    client = influxdb_client.InfluxDBClient(url=influxdb['url'], token=influxdb['token'], org=influxdb['org'], verify_ssl=False)
+    influxdb['query_api'] = client.query_api()
 
     scheduler.start()
 

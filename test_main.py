@@ -26,13 +26,13 @@ class Test(TestCase):
         peak = [{'start': 630, 'end': 900}, {'start': 1500, 'end': 1900}]
         self.assertFalse(_is_peak(us_holidays, settings, peak, datetime(2022, 5, 30)))
         self.assertFalse(_is_peak(us_holidays, settings, peak, datetime(2022, 9, 5)))
-        self.assertTrue(_is_peak(us_holidays, settings, peak, datetime(2022, 7, 3, 6, 30)))
+        self.assertFalse(_is_peak(us_holidays, settings, peak, datetime(2022, 7, 3, 6, 30)))
         self.assertFalse(_is_peak(us_holidays, settings, peak, datetime(2022, 7, 4)))
         self.assertTrue(_is_peak(us_holidays, settings, peak, datetime(2022, 11, 11, 15)))
         self.assertFalse(_is_peak(us_holidays, settings, peak, datetime(2021, 11, 25)))
         self.assertFalse(_is_peak(us_holidays, settings, peak, datetime(2021, 12, 24)))
-        self.assertTrue(_is_peak(us_holidays, settings, peak, datetime(2021, 12, 25, 7)))
-        self.assertTrue(_is_peak(us_holidays, settings, peak, datetime(2022, 12, 25, 16)))
+        self.assertFalse(_is_peak(us_holidays, settings, peak, datetime(2021, 12, 25, 7)))
+        self.assertFalse(_is_peak(us_holidays, settings, peak, datetime(2022, 12, 25, 16)))
         self.assertFalse(_is_peak(us_holidays, settings, peak, datetime(2022, 12, 26)))
         self.assertFalse(_is_peak(us_holidays, settings, peak, datetime(2023, 12, 25)))
         self.assertFalse(_is_peak(us_holidays, settings, peak, datetime(2022, 12, 25, 9)))
@@ -59,11 +59,14 @@ class Test(TestCase):
             (datetime(2021, 10, 1, 2, 40), 'cool', 284, False),
             (datetime(2021, 10, 1, 2, 41), 'cool', 284, False),
             (datetime(2021, 10, 2, 15, 0), 'cool', 284, False),
-            (datetime(2021, 10, 2, 18, 0), 'cool', 302, True),
-            (datetime(2021, 10, 2, 18, 1), 'cool', 302, True),
-            (datetime(2021, 10, 2, 20, 0), 'cool', 320, True),
+            (datetime(2021, 10, 2, 18, 0), 'cool', 302, False),
+            (datetime(2021, 10, 2, 18, 1), 'cool', 302, False),
+            (datetime(2021, 10, 2, 20, 0), 'cool', 320, False),
             (datetime(2021, 10, 3, 22, 0), 'cool', 320, False),
             (datetime(2021, 10, 4, 0, 49), 'cool', 320, False),
+            (datetime(2021, 10, 4, 18, 0), 'cool', 302, True),
+            (datetime(2021, 10, 4, 18, 1), 'cool', 302, True),
+            (datetime(2021, 10, 4, 21, 0), 'cool', 284, False),
         ]
         for ii, tt in enumerate(tests):
             dt, mode, result, is_peak = tt
