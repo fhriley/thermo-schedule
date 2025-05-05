@@ -278,7 +278,7 @@ def thermo_task(data: Data):
         peak_temp = new_sched['peak_temp']
 
         if is_peak and solar_prod < solar_prod_thresh:
-            data.log.info(f'solar production is below threshold, changing to peak temp: {peak_temp}')
+            data.log.info(f'solar production ({solar_prod}) is below threshold ({solar_prod_thresh}), changing to peak temp: {peak_temp}')
             new_sched['temp'] = peak_temp
 
         new_sched["id"] = new_sched["id"] + (new_sched["temp"],)
