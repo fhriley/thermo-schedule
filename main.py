@@ -278,7 +278,7 @@ def thermo_task(data: Data):
         peak_temp = new_sched['peak_temp']
 
         if is_peak and solar_prod < solar_prod_thresh:
-            data.log.info(f'solar production ({solar_prod}) is below threshold ({solar_prod_thresh}), changing to peak temp: {peak_temp}')
+            data.log.info(f'solar production ({solar_prod:.3f}) is below threshold ({solar_prod_thresh:.1f}), changing to peak temp: {peak_temp}')
             new_sched['temp'] = peak_temp
 
         new_sched["id"] = new_sched["id"] + (new_sched["temp"],)
@@ -315,7 +315,7 @@ def thermo_task(data: Data):
                        f'fan_state={data.fan_state} new_fan_state={fan_state} '
                        f'is_holiday={is_holiday} '
                        f'is_peak={is_peak} '
-                       f'solar_prod={solar_prod}')
+                       f'solar_prod={solar_prod:.3f}')
 
         if data.state != new_sched['id'] or last_fan_state != fan_state:
             api_data = dict(mode=mode, heattemp=heattemp, cooltemp=cooltemp, fan=fan_state)
@@ -326,7 +326,7 @@ def thermo_task(data: Data):
                 f'fan={fan_state} '
                 f'is_holiday={is_holiday} '
                 f'is_peak={is_peak} '
-                f'solar_prod={solar_prod}')
+                f'solar_prod={solar_prod:.3f}')
             _set_temp(data.log, data.uri, api_data, data.timeout)
             data.state = new_sched['id']
             data.fan_state = fan_state
