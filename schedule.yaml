@@ -105,7 +105,7 @@ settings:
   fan_mins_per_hour: 10
   solar_prod_thresh:
     heat: 1.0
-    cool: 3.5
+    cool: 4.0
   consumption_thresh:
     heat: 1.0
     cool: 1.0

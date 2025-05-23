@@ -217,6 +217,7 @@ class Data:
         self.fan_state = 0
         self.solar_prod_thresh: dict = settings.get('solar_prod_thresh') or 100.0
         self.consumption_thresh: dict = settings.get('consumption_thresh') or 0.0
+        self.last_on: Optional[datetime.datetime] = None
 
 
 def get_solar_prod_cons(data: Data) -> tuple[float, float]:
@@ -256,6 +257,10 @@ def thermo_task(data: Data):
         data.log.debug('%s', resp)
 
         thermo_state = resp['state']
+
+        def is_on(state):
+            return state in (1, 2)
+
         mode = resp['mode']
         # Don't do anything if the schedule is on or the mode is off or auto
         if resp['schedule'] or mode in (0, 3):
@@ -269,6 +274,9 @@ def thermo_task(data: Data):
             raise Exception(f'invalid mode: {mode}')
 
         now = datetime.datetime.now()
+        if is_on(thermo_state):
+            data.last_on = now
+
         new_sched = _get_active_schedule(us_holidays, data.settings, data.schedule, now, mode_str)
         if new_sched is None:
             data.log.debug('no schedule set')
@@ -283,7 +291,7 @@ def thermo_task(data: Data):
         peak_temp = new_sched['peak_temp']
 
         if is_peak:
-            if thermo_state in (1, 2):
+            if is_on(thermo_state):
                 # cooling or heating
                 diff = solar_prod - consumption
                 if diff < consumption_thresh:
@@ -313,7 +321,7 @@ def thermo_task(data: Data):
             data.fan_state = 0
         else:
             # NOTE, this should use 'fanstate', but it doesn't seem to actually return the fan state
-            if resp['state'] in (1, 2) or data.fan_state:
+            if is_on(thermo_state) or data.fan_state:
                 data.fan_mins += data.interval_secs / 60.0
         data.last_update = now
 
