@@ -18,7 +18,7 @@ from apscheduler.triggers.date import DateTrigger
 SOLAR_PROD_QUERY = '''from(bucket: "solar")
       |> range(start: -2h)
       |> filter(fn: (r) => r["_measurement"] == "realtime_energy")
-      |> filter(fn: (r) => r["_field"] == "production")
+      |> filter(fn: (r) => r["_field"] == "production" or r["_field"] == "consumption")
       |> timedMovingAverage(every: %ss, period: 10m)
       |> last()'''
 
@@ -215,11 +215,14 @@ class Data:
         self.last_update: datetime.datetime = None
         self.fan_mins_per_hour = float(settings.get('fan_mins_per_hour', 0))
         self.fan_state = 0
-        self.solar_prod_thresh: dict = settings.get('solar_prod_thresh') or {}
+        self.solar_prod_thresh: dict = settings.get('solar_prod_thresh') or 100.0
+        self.consumption_thresh: dict = settings.get('consumption_thresh') or 0.0
 
 
-def get_solar_prod(data: Data) -> Optional[float]:
-    solar_prod = None
+def get_solar_prod_cons(data: Data) -> tuple[float, float]:
+    solar_prod = 0
+    consumption = 0
+
     try:
         influxdb = data.settings['influxdb']
         interval = data.settings['interval'] // 2
@@ -227,11 +230,15 @@ def get_solar_prod(data: Data) -> Optional[float]:
         result = influxdb['query_api'].query(org=influxdb['org'], query=query)
         for table in result:
             for record in table.records:
-                solar_prod = record.get_value() / 1000.0
-                break
+                if record.get_field() == 'consumption':
+                    consumption = record.get_value() / 1000.0
+                    continue
+                if record.get_field() == 'production':
+                    solar_prod = record.get_value() / 1000.0
     except Exception:
         data.log.exception('failed to get solar production')
-    return solar_prod
+
+    return solar_prod, consumption
 
 
 def thermo_task(data: Data):
@@ -248,6 +255,7 @@ def thermo_task(data: Data):
         resp = resp.json()
         data.log.debug('%s', resp)
 
+        thermo_state = resp['state']
         mode = resp['mode']
         # Don't do anything if the schedule is on or the mode is off or auto
         if resp['schedule'] or mode in (0, 3):
@@ -266,20 +274,27 @@ def thermo_task(data: Data):
             data.log.debug('no schedule set')
             return
 
-        solar_prod_thresh = data.solar_prod_thresh.get(mode_str, 0.0)
-
-        solar_prod = get_solar_prod(data)
-        if solar_prod is None:
-            data.log.warning('solar production not available, setting to 0')
-            solar_prod = 0.0
+        solar_prod_thresh = data.solar_prod_thresh.get(mode_str, 100.0)
+        consumption_thresh = data.consumption_thresh.get(mode_str, 0.0)
+        solar_prod, consumption = get_solar_prod_cons(data)
 
         is_holiday = new_sched['is_holiday']
         is_peak = new_sched['is_peak']
         peak_temp = new_sched['peak_temp']
 
-        if is_peak and solar_prod < solar_prod_thresh:
-            data.log.info(f'solar production ({solar_prod:.3f}) is below threshold ({solar_prod_thresh:.1f}), changing to peak temp: {peak_temp}')
-            new_sched['temp'] = peak_temp
+        if is_peak:
+            if thermo_state in (1, 2):
+                # cooling or heating
+                diff = solar_prod - consumption
+                if diff < consumption_thresh:
+                    data.log.info(f'prod - cons ({diff:.3f}) is below threshold ({consumption_thresh:.1f}), changing to peak temp: {peak_temp}')
+                    new_sched['temp'] = peak_temp
+            else:
+                # off
+                if solar_prod < solar_prod_thresh:
+                    data.log.info(
+                        f'solar production ({solar_prod:.3f}) is below threshold ({solar_prod_thresh:.1f}), changing to peak temp: {peak_temp}')
+                    new_sched['temp'] = peak_temp
 
         new_sched["id"] = new_sched["id"] + (new_sched["temp"],)
 
@@ -315,7 +330,8 @@ def thermo_task(data: Data):
                        f'fan_state={data.fan_state} new_fan_state={fan_state} '
                        f'is_holiday={is_holiday} '
                        f'is_peak={is_peak} '
-                       f'solar_prod={solar_prod:.3f}')
+                       f'solar_prod={solar_prod:.3f} '
+                       f'consumption={consumption:.3f}')
 
         if data.state != new_sched['id'] or last_fan_state != fan_state:
             api_data = dict(mode=mode, heattemp=heattemp, cooltemp=cooltemp, fan=fan_state)
@@ -326,7 +342,8 @@ def thermo_task(data: Data):
                 f'fan={fan_state} '
                 f'is_holiday={is_holiday} '
                 f'is_peak={is_peak} '
-                f'solar_prod={solar_prod:.3f}')
+                f'solar_prod={solar_prod:.3f} '
+                f'consumption={consumption:.3f}')
             _set_temp(data.log, data.uri, api_data, data.timeout)
             data.state = new_sched['id']
             data.fan_state = fan_state
@@ -351,6 +368,11 @@ def main():
     else:
         cron = CronTrigger(minute='*')
 
+    influxdb = settings['influxdb']
+    client = influxdb_client.InfluxDBClient(url=influxdb['url'], token=influxdb['token'], org=influxdb['org'],
+                                            verify_ssl=False)
+    influxdb['query_api'] = client.query_api()
+
     trigger = OrTrigger([DateTrigger(), cron])
 
     scheduler = BlockingScheduler({
@@ -361,11 +383,6 @@ def main():
     for thermo in thermostats:
         data = Data(log, thermo, settings)
         scheduler.add_job(lambda: thermo_task(data), trigger)
-
-    influxdb = settings['influxdb']
-    client = influxdb_client.InfluxDBClient(url=influxdb['url'], token=influxdb['token'], org=influxdb['org'],
-                                            verify_ssl=False)
-    influxdb['query_api'] = client.query_api()
 
     scheduler.start()
 
