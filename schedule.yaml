@@ -107,8 +107,9 @@ settings:
     heat: 1.0
     cool: 4.0
   consumption_thresh:
-    heat: 1.0
-    cool: 1.0
+    heat: -1.0
+    cool: -1.0
+  min_comp_time_s: 60
   influxdb:
     url: 'http://192.168.1.246:8086'
     org: 'riley'

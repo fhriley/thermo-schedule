@@ -217,7 +217,8 @@ class Data:
         self.fan_state = 0
         self.solar_prod_thresh: dict = settings.get('solar_prod_thresh') or 100.0
         self.consumption_thresh: dict = settings.get('consumption_thresh') or 0.0
-        self.last_on: Optional[datetime.datetime] = None
+        self.last_off: datetime.datetime = datetime.datetime(1900, 1, 1)
+        self.min_comp_time_s = settings.get('min_comp_time_s') or 300.0
 
 
 def get_solar_prod_cons(data: Data) -> tuple[float, float]:
@@ -274,8 +275,6 @@ def thermo_task(data: Data):
             raise Exception(f'invalid mode: {mode}')
 
         now = datetime.datetime.now()
-        if is_on(thermo_state):
-            data.last_on = now
 
         new_sched = _get_active_schedule(us_holidays, data.settings, data.schedule, now, mode_str)
         if new_sched is None:
@@ -289,20 +288,29 @@ def thermo_task(data: Data):
         is_holiday = new_sched['is_holiday']
         is_peak = new_sched['is_peak']
         peak_temp = new_sched['peak_temp']
+        set_to_peak = False
 
         if is_peak:
-            if is_on(thermo_state):
-                # cooling or heating
-                diff = solar_prod - consumption
-                if diff < consumption_thresh:
-                    data.log.info(f'prod - cons ({diff:.3f}) is below threshold ({consumption_thresh:.1f}), changing to peak temp: {peak_temp}')
-                    new_sched['temp'] = peak_temp
+            comp_s = (now - data.last_off).seconds
+            if comp_s < data.min_comp_time_s:
+                data.log.info(
+                    f'compressor off for {comp_s} < {data.min_comp_time_s}, staying at peak temp: {peak_temp}')
+                new_sched['temp'] = peak_temp
             else:
-                # off
-                if solar_prod < solar_prod_thresh:
-                    data.log.info(
-                        f'solar production ({solar_prod:.3f}) is below threshold ({solar_prod_thresh:.1f}), changing to peak temp: {peak_temp}')
-                    new_sched['temp'] = peak_temp
+                if is_on(thermo_state):
+                    # cooling or heating
+                    diff = solar_prod - consumption
+                    if diff < consumption_thresh:
+                        data.log.info(f'prod - cons ({diff:.3f}) is below threshold ({consumption_thresh:.1f}), changing to peak temp: {peak_temp}')
+                        new_sched['temp'] = peak_temp
+                        set_to_peak = True
+                else:
+                    # off
+                    if solar_prod < solar_prod_thresh:
+                        data.log.info(
+                            f'solar production ({solar_prod:.3f}) is below threshold ({solar_prod_thresh:.1f}), changing to peak temp: {peak_temp}')
+                        new_sched['temp'] = peak_temp
+                        set_to_peak = True
 
         new_sched["id"] = new_sched["id"] + (new_sched["temp"],)
 
@@ -355,6 +363,8 @@ def thermo_task(data: Data):
             _set_temp(data.log, data.uri, api_data, data.timeout)
             data.state = new_sched['id']
             data.fan_state = fan_state
+            if set_to_peak:
+                data.last_off = now
         else:
             data.log.debug('already in the desired state')
     except Exception:
