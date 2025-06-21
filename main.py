@@ -349,13 +349,13 @@ def thermo_task(data: Data):
                        f'solar_prod={solar_prod:.3f} '
                        f'consumption={consumption:.3f}')
 
-        if data.state != new_sched['id'] or last_fan_state != fan_state:
-            api_data = dict(mode=mode, heattemp=heattemp, cooltemp=cooltemp, fan=fan_state)
+        if data.state != new_sched['id']:# or last_fan_state != fan_state:
+            api_data = dict(mode=mode, heattemp=heattemp, cooltemp=cooltemp)#, fan=fan_state)
             data.log.info(
                 f'updating thermostat: mode={mode_str} '
                 f'heattemp={heattemp} '
                 f'cooltemp={cooltemp} '
-                f'fan={fan_state} '
+                #f'fan={fan_state} '
                 f'is_holiday={is_holiday} '
                 f'is_peak={is_peak} '
                 f'solar_prod={solar_prod:.3f} '
