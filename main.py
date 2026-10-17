@@ -48,6 +48,7 @@ def load_schedule(path: str) -> Tuple[list, dict]:
         for name, sched in thermostat['schedules'].items():
             start = datetime.datetime.strptime(sched['start'], "%m/%d").date()
             sched['start'] = (start.month, start.day)
+            sched['peak'] = sched.get('peak') or []
             for typ in ('heat', 'cool'):
                 typ_sched = sched.get(typ)
                 if typ_sched:
@@ -69,6 +70,9 @@ def load_schedule(path: str) -> Tuple[list, dict]:
                         raise Exception("schedule does not contain all days of the week")
                     sched[typ]['holiday'] = holiday
                     sched[typ]['peak'] = peak
+                    if peak is None and sched['peak']:
+                        logging.getLogger('thermo').warning(
+                            f'{name} {typ} schedule has no peak temp, so its peak periods will be ignored')
             arr.append(sched)
         ret.append({'url': thermostat.get('url'), 'schedule': sorted(arr, key=lambda xx: xx['start'])})
     return ret, schedule.get('settings', {})
@@ -107,8 +111,6 @@ def _get_active_schedule(us_holidays: holidays.HolidayBase, settings: dict, sche
     mmdd = (dt.month, dt.day)
     sch_idx = bisect.bisect_right(schedule, mmdd, key=lambda xx: xx['start'])
     sch_idx -= 1
-    if sch_idx == 0 and mmdd < schedule[0]['start']:
-        sch_idx -= 1
 
     peak = schedule[sch_idx]['peak']
     sched = schedule[sch_idx].get(mode)
@@ -119,10 +121,8 @@ def _get_active_schedule(us_holidays: holidays.HolidayBase, settings: dict, sche
     time = dt.time()
 
     is_holiday = _is_holiday(us_holidays, settings, dt)
-    if is_holiday:
-        day = sched['holiday']
-    else:
-        day = sched['days'][weekday]
+    # Holidays fall back to the weekday schedule when no holiday schedule is defined
+    day = sched['holiday'] if is_holiday and sched['holiday'] else sched['days'][weekday]
 
     # Handle the case where we are before the first time of a new weekday and/or schedule
     if time < day[0].time:
@@ -133,10 +133,8 @@ def _get_active_schedule(us_holidays: holidays.HolidayBase, settings: dict, sche
             sched = schedule[sch_idx].get(mode)
             if not sched:
                 return None
-        if _is_holiday(us_holidays, settings, dt - datetime.timedelta(days=1)):
-            day = sched['holiday']
-        else:
-            day = sched['days'][weekday]
+        is_holiday = _is_holiday(us_holidays, settings, dt - datetime.timedelta(days=1))
+        day = sched['holiday'] if is_holiday and sched['holiday'] else sched['days'][weekday]
         return {
             'id': (sch_idx, mode, weekday, day[-1].time, day[-1].temperature),
             'temp': day[-1].temperature,
@@ -155,6 +153,20 @@ def _get_active_schedule(us_holidays: holidays.HolidayBase, settings: dict, sche
     }
 
 
+class ThermostatRejected(Exception):
+    pass
+
+
+def _raise_if_rejected(resp: requests.Response):
+    # Venstar reports a rejected request as HTTP 200 with {"error": true, "reason": "..."}
+    try:
+        body = resp.json()
+    except ValueError:
+        return
+    if isinstance(body, dict) and body.get('error'):
+        raise ThermostatRejected(f'thermostat rejected update: {body.get("reason", "no reason given")}')
+
+
 def _equiv_temps(left, right):
     return round(left * 10) == round(right * 10)
 
@@ -165,10 +177,13 @@ def _set_temp(log: logging.Logger, uri: str, data: dict, timeout: float):
         try:
             resp = requests.post(urljoin(uri, '/control'), data=data, timeout=timeout)
             resp.raise_for_status()
+            _raise_if_rejected(resp)
+        except ThermostatRejected:
+            raise
         except Exception as exc:
             if tries == 1:
                 raise Exception(f'failed to set new state: {exc}')
-            log.error(f'failure in _set_temp, will retry: %s', exc)
+            log.error('failure in _set_temp, will retry: %s', exc)
             sleep(3)
             tries -= 1
             continue
@@ -181,7 +196,7 @@ def _set_temp(log: logging.Logger, uri: str, data: dict, timeout: float):
         except Exception as exc:
             if tries == 1:
                 raise Exception(f'failed to set new state: {exc}')
-            log.error(f'failure in _set_temp, will retry: %s', exc)
+            log.error('failure in _set_temp, will retry: %s', exc)
             tries -= 1
             continue
 
@@ -200,45 +215,77 @@ def _set_temp(log: logging.Logger, uri: str, data: dict, timeout: float):
     raise Exception('failed to set new state')
 
 
+def _seconds_setting(settings: dict, key: str, default: float) -> float:
+    value = settings.get(key)
+    return default if value is None else float(value)
+
+
 class Data:
     def __init__(self, log, thermo, settings):
         self.log: logging.Logger = log
-        self.schedule: dict = thermo['schedule']
+        self.schedule: list = thermo['schedule']
         self.settings: dict = settings
         self.uri: str = thermo['url']
         self.timeout = float(settings.get('timeout', 3))
+        self.us_holidays = holidays.UnitedStates(observed=True)
         self.state: tuple = ()
         self.solar_prod_thresh: dict = settings.get('solar_prod_thresh') or {}
         self.consumption_thresh: dict = settings.get('consumption_thresh') or {}
+        # When peak was last forced, which turns the compressor off
         self.last_off: datetime.datetime = datetime.datetime(1900, 1, 1)
-        min_comp_time_s = settings.get('min_comp_time_s')
-        self.min_comp_time_s = 300.0 if min_comp_time_s is None else float(min_comp_time_s)
+        self.min_comp_time_s = _seconds_setting(settings, 'min_comp_time_s', 300.0)
+        # When the compressor was first seen running, or None if it is off
+        self.on_since: Optional[datetime.datetime] = None
+        self.min_on_time_s = _seconds_setting(settings, 'min_on_time_s', 300.0)
+        # Whether the last setpoint sent was a peak override
+        self.at_peak = False
+        self.solar_failing = False
 
 
-def get_solar_prod_cons(data: Data) -> tuple[float, float]:
-    solar_prod = 0
-    consumption = 0
-
+def get_solar_prod_cons(data: Data) -> Optional[tuple[float, float]]:
+    """Returns (production, consumption) in kW, or None if they are unavailable."""
     try:
         db = data.settings['timescaledb']
         with psycopg.connect(host=db['host'], port=db.get('port', 5432), dbname=db['dbname'], user=db['user'],
-                             password=db['password'], connect_timeout=int(data.timeout)) as conn:
+                             password=db['password'], connect_timeout=int(data.timeout),
+                             options=f'-c statement_timeout={int(data.timeout * 1000)}') as conn:
             row = conn.execute(SOLAR_PROD_QUERY).fetchone()
         if row[0] is None or row[1] is None:
             raise Exception('no recent meter data')
-        solar_prod = row[0] / 1000.0
-        consumption = row[1] / 1000.0
     except Exception:
-        data.log.exception('failed to get solar production')
+        if data.solar_failing:
+            data.log.debug('still failing to get solar production', exc_info=True)
+        else:
+            data.log.exception('failed to get solar production; treating solar as insufficient during peak')
+            data.solar_failing = True
+        return None
 
-    return solar_prod, consumption
+    if data.solar_failing:
+        data.log.info('solar production is available again')
+        data.solar_failing = False
+    return row[0] / 1000.0, row[1] / 1000.0
+
+
+def _peak_reason(data: Data, mode_str: str, is_on: bool, solar: Optional[tuple[float, float]]) -> Optional[str]:
+    """Why solar can't cover the HVAC right now, or None if it can."""
+    if solar is None:
+        return 'solar production is unknown'
+    solar_prod, consumption = solar
+    if is_on:
+        consumption_thresh = data.consumption_thresh.get(mode_str, 0.0)
+        diff = solar_prod - consumption
+        if diff < consumption_thresh:
+            return f'prod - cons ({diff:.3f}) is below threshold ({consumption_thresh:.1f})'
+    else:
+        solar_prod_thresh = data.solar_prod_thresh.get(mode_str, 100.0)
+        if solar_prod < solar_prod_thresh:
+            return f'solar production ({solar_prod:.3f}) is below threshold ({solar_prod_thresh:.1f})'
+    return None
 
 
 def thermo_task(data: Data):
     if data.log.isEnabledFor(logging.DEBUG):
         data.log.debug('starting thermo task')
-
-    us_holidays = holidays.UnitedStates(observed=True)
 
     # noinspection PyBroadException
     try:
@@ -248,10 +295,14 @@ def thermo_task(data: Data):
         resp = resp.json()
         data.log.debug('%s', resp)
 
-        thermo_state = resp['state']
+        now = datetime.datetime.now()
 
-        def is_on(state):
-            return state in (1, 2)
+        # state 1 is heating, 2 is cooling
+        is_on = resp['state'] in (1, 2)
+        if not is_on:
+            data.on_since = None
+        elif data.on_since is None:
+            data.on_since = now
 
         mode = resp['mode']
         # Don't do anything if the schedule is on or the mode is off or auto
@@ -265,61 +316,57 @@ def thermo_task(data: Data):
         else:
             raise Exception(f'invalid mode: {mode}')
 
-        now = datetime.datetime.now()
-
-        new_sched = _get_active_schedule(us_holidays, data.settings, data.schedule, now, mode_str)
+        new_sched = _get_active_schedule(data.us_holidays, data.settings, data.schedule, now, mode_str)
         if new_sched is None:
             data.log.debug('no schedule set')
             return
 
-        solar_prod_thresh = data.solar_prod_thresh.get(mode_str, 100.0)
-        consumption_thresh = data.consumption_thresh.get(mode_str, 0.0)
-        solar_prod, consumption = get_solar_prod_cons(data)
+        solar = get_solar_prod_cons(data)
+        solar_log = ('solar=unknown' if solar is None
+                     else f'solar_prod={solar[0]:.3f} consumption={solar[1]:.3f}')
 
         is_holiday = new_sched['is_holiday']
         is_peak = new_sched['is_peak']
         peak_temp = new_sched['peak_temp']
         set_to_peak = False
+        at_peak = False
 
-        if is_peak:
-            comp_s = int((now - data.last_off).total_seconds())
-            if comp_s < data.min_comp_time_s:
+        if is_peak and peak_temp is None:
+            data.log.debug(f'no {mode_str} peak temp set, ignoring peak period')
+        elif is_peak:
+            off_s = int((now - data.last_off).total_seconds())
+            if off_s < data.min_comp_time_s:
                 data.log.info(
-                    f'compressor off for {comp_s} < {data.min_comp_time_s}, staying at peak temp: {peak_temp}')
+                    f'compressor off for {off_s} < {data.min_comp_time_s}, staying at peak temp: {peak_temp}')
                 new_sched['temp'] = peak_temp
+                at_peak = True
             else:
-                if is_on(thermo_state):
-                    # cooling or heating
-                    diff = solar_prod - consumption
-                    if diff < consumption_thresh:
-                        data.log.info(f'prod - cons ({diff:.3f}) is below threshold ({consumption_thresh:.1f}), changing to peak temp: {peak_temp}')
-                        new_sched['temp'] = peak_temp
-                        set_to_peak = True
-                else:
-                    # off
-                    if solar_prod < solar_prod_thresh:
-                        data.log.info(
-                            f'solar production ({solar_prod:.3f}) is below threshold ({solar_prod_thresh:.1f}), changing to peak temp: {peak_temp}')
-                        new_sched['temp'] = peak_temp
-                        set_to_peak = True
+                reason = _peak_reason(data, mode_str, is_on, solar)
+                on_s = int((now - data.on_since).total_seconds()) if is_on else None
+                # Don't cut a compressor off right after it starts, unless it started at the peak temp
+                if reason and is_on and not data.at_peak and on_s < data.min_on_time_s:
+                    data.log.info(f'{reason}, but compressor on for {on_s} < {data.min_on_time_s}, '
+                                  f'staying at schedule temp: {new_sched["temp"]}')
+                elif reason:
+                    data.log.info(f'{reason}, changing to peak temp: {peak_temp}')
+                    new_sched['temp'] = peak_temp
+                    set_to_peak = True
+                    at_peak = True
 
         new_sched["id"] = new_sched["id"] + (new_sched["temp"],)
 
         if mode_str == 'heat':
             heattemp = new_sched['temp']
             cooltemp = resp['cooltemp']
-        elif mode_str == 'cool':
+        else:
             heattemp = resp['heattemp']
             cooltemp = new_sched['temp']
-        else:
-            raise Exception('invalid mode_str: ' + mode_str)
 
         data.log.debug(f'mode={mode_str} heattemp={heattemp} '
                        f'cooltemp={cooltemp} state={data.state} new_state={new_sched["id"]} '
                        f'is_holiday={is_holiday} '
                        f'is_peak={is_peak} '
-                       f'solar_prod={solar_prod:.3f} '
-                       f'consumption={consumption:.3f}')
+                       f'{solar_log}')
 
         if data.state != new_sched['id']:
             api_data = dict(mode=mode, heattemp=heattemp, cooltemp=cooltemp)
@@ -329,24 +376,31 @@ def thermo_task(data: Data):
                 f'cooltemp={cooltemp} '
                 f'is_holiday={is_holiday} '
                 f'is_peak={is_peak} '
-                f'solar_prod={solar_prod:.3f} '
-                f'consumption={consumption:.3f}')
+                f'{solar_log}')
             _set_temp(data.log, data.uri, api_data, data.timeout)
             data.state = new_sched['id']
+            data.at_peak = at_peak
             if set_to_peak:
                 data.last_off = now
         else:
             data.log.debug('already in the desired state')
+    except ThermostatRejected as exc:
+        data.log.error('%s', exc)
     except Exception:
         data.log.exception('unknown failure')
 
 
 def main():
     log = logging.getLogger('thermo')
-    log.setLevel(getattr(logging, os.environ.get('LOGLEVEL', 'INFO')))
+    level_name = os.environ.get('LOGLEVEL', 'INFO').upper()
+    level = logging.getLevelName(level_name)
+    if not isinstance(level, int):
+        log.warning(f'invalid LOGLEVEL {level_name!r}, using INFO')
+        level = logging.INFO
+    log.setLevel(level)
     thermostats, settings = load_schedule(os.environ.get('SCHEDULE', '/config/schedule.yaml'))
-    interval_secs_requested = min(int(settings.get('interval', 60)), 60)
-    interval_secs = 60 // int(round(60 / interval_secs_requested))
+    interval_secs_requested = int(settings.get('interval', 60))
+    interval_secs = 60 // int(round(60 / min(interval_secs_requested, 60)))
 
     if interval_secs_requested != interval_secs:
         log.warning(f'interval was adjusted to {interval_secs}')

@@ -56,16 +56,15 @@ def run_thermo_task(data, now, mode=2, state=0, schedule_on=0, heattemp=60.0, co
                     set_temp_effect=None, get_effect=None):
     """Run thermo_task once at `now` against a fake thermostat.
 
-    solar=None leaves get_solar_prod_cons unpatched. Returns the _set_temp and get_solar_prod_cons mocks.
+    `solar` is what get_solar_prod_cons returns (None means unavailable). Returns the _set_temp and
+    get_solar_prod_cons mocks.
     """
     resp = MagicMock()
     resp.json.return_value = {'state': state, 'mode': mode, 'schedule': schedule_on, 'heattemp': heattemp,
                               'cooltemp': cooltemp}
     with ExitStack() as stack:
         stack.enter_context(patch('main.requests.get', return_value=resp, side_effect=get_effect))
-        get_solar = None
-        if solar is not None:
-            get_solar = stack.enter_context(patch('main.get_solar_prod_cons', return_value=solar))
+        get_solar = stack.enter_context(patch('main.get_solar_prod_cons', return_value=solar))
         set_temp = stack.enter_context(patch('main._set_temp', side_effect=set_temp_effect))
         stack.enter_context(patch('main.datetime', fake_datetime(now)))
         main.thermo_task(data)
@@ -77,7 +76,10 @@ def week(times, days=DAYS):
 
 
 def season(start, heat=None, cool=None, peak=()):
-    sched = {'start': start, 'peak': [{'start': begin, 'end': end} for begin, end in peak]}
+    """A season for write_schedule; peak=None leaves out the season's peak list."""
+    sched = {'start': start}
+    if peak is not None:
+        sched['peak'] = [{'start': begin, 'end': end} for begin, end in peak]
     if heat is not None:
         sched['heat'] = heat
     if cool is not None:
@@ -202,9 +204,12 @@ class TestMain(TestCase):
 
 
 class TestThermoTaskPeak(TestCase):
-    def _run(self, now, last_off, solar_prod=10.0, consumption=1.0, thermo_state=0, settings_overrides=None):
+    def _run(self, now, last_off, solar_prod=10.0, consumption=1.0, thermo_state=0, settings_overrides=None,
+             on_for=timedelta(hours=1)):
         data = make_data(settings_overrides)
         data.last_off = last_off
+        if thermo_state in (1, 2):
+            data.on_since = now - on_for
         set_temp, _ = run_thermo_task(data, now, state=thermo_state, solar=(solar_prod, consumption))
         self.assertEqual(set_temp.call_count, 1, 'thermostat was not updated')
         return set_temp.call_args.args[2]['cooltemp'], data
@@ -254,7 +259,9 @@ class TestThermoTaskPeak(TestCase):
         self.assertEqual(cooltemp, COOL_SCHEDULE_TEMP)
 
     def test_heating_below_consumption_threshold_forces_heat_peak_temp(self):
-        set_temp, _ = run_thermo_task(make_data(), PEAK_NOW, mode=1, state=1, solar=(0.5, 3.0))
+        data = make_data()
+        data.on_since = PEAK_NOW - timedelta(hours=1)
+        set_temp, _ = run_thermo_task(data, PEAK_NOW, mode=1, state=1, solar=(0.5, 3.0))
         self.assertEqual(set_temp.call_args.args[2]['heattemp'], HEAT_PEAK_TEMP)
 
     def test_missing_thresholds_use_defaults(self):
@@ -269,13 +276,31 @@ class TestThermoTaskPeak(TestCase):
         self.assertEqual(cooltemp, COOL_PEAK_TEMP)
         self.assertEqual(data.min_comp_time_s, 300.0)
 
+    def test_compressor_that_just_started_is_not_cut_off(self):
+        cooltemp, data = self._run(PEAK_NOW, last_off=datetime(1900, 1, 1), solar_prod=3.0, consumption=5.0,
+                                   thermo_state=2, on_for=timedelta(seconds=60))
+        self.assertEqual(cooltemp, COOL_SCHEDULE_TEMP)
+        self.assertFalse(data.at_peak)
+
+    def test_compressor_is_cut_off_after_min_on_time(self):
+        cooltemp, data = self._run(PEAK_NOW, last_off=datetime(1900, 1, 1), solar_prod=3.0, consumption=5.0,
+                                   thermo_state=2, on_for=timedelta(seconds=301))
+        self.assertEqual(cooltemp, COOL_PEAK_TEMP)
+        self.assertTrue(data.at_peak)
+
+    def test_zero_min_on_time_disables_it(self):
+        overrides = dict(THRESHOLDS, min_on_time_s=0)
+        cooltemp, _ = self._run(PEAK_NOW, last_off=datetime(1900, 1, 1), solar_prod=3.0, consumption=5.0,
+                                thermo_state=2, on_for=timedelta(0), settings_overrides=overrides)
+        self.assertEqual(cooltemp, COOL_PEAK_TEMP)
+
     def test_zero_min_comp_time_disables_hold(self):
         overrides = dict(THRESHOLDS, min_comp_time_s=0)
         cooltemp, _ = self._run(PEAK_NOW, last_off=PEAK_NOW - timedelta(seconds=1), settings_overrides=overrides)
         self.assertEqual(cooltemp, COOL_SCHEDULE_TEMP)
 
 
-class TestThermoTask(TestCase):
+class TestThermoTask(ScheduleFileMixin, TestCase):
     def test_heat_mode_sets_heattemp_and_keeps_cooltemp(self):
         set_temp, _ = run_thermo_task(make_data(), OFF_PEAK_NOW, mode=1, heattemp=60.0, cooltemp=80.0)
         set_temp.assert_called_once_with(ANY, 'http://thermo', {'mode': 1, 'heattemp': HEAT_OFF_PEAK_TEMP,
@@ -349,20 +374,76 @@ class TestThermoTask(TestCase):
         set_temp.assert_not_called()
         get_solar.assert_not_called()
 
-    def test_solar_unavailable(self):
-        # Pins current behavior (review issue 7): with no solar data an idle compressor is held at the peak temp,
-        # but a running one keeps the schedule temp because 0 - 0 is above the -1 kW consumption threshold
-        settings = dict(THRESHOLDS, timescaledb={'host': 'db', 'dbname': 'solar', 'user': 'u', 'password': 'p'})
-        for state, expected in ((0, COOL_PEAK_TEMP), (2, COOL_SCHEDULE_TEMP)):
-            with self.subTest(state=state), \
-                    patch('main.psycopg.connect', side_effect=psycopg.OperationalError('down')), \
-                    self.assertLogs('test.thermo', logging.ERROR):
-                set_temp, _ = run_thermo_task(make_data(settings), PEAK_NOW, state=state, solar=None)
-                self.assertEqual(set_temp.call_args.args[2]['cooltemp'], expected)
+    def test_solar_unavailable_forces_peak(self):
+        for state in (0, 2):
+            with self.subTest(state=state):
+                data = make_data()
+                data.on_since = PEAK_NOW - timedelta(hours=1)
+                set_temp, _ = run_thermo_task(data, PEAK_NOW, state=state, solar=None)
+                self.assertEqual(set_temp.call_args.args[2]['cooltemp'], COOL_PEAK_TEMP)
+
+    def test_solar_unavailable_off_peak_keeps_schedule(self):
+        set_temp, _ = run_thermo_task(make_data(), OFF_PEAK_NOW, solar=None)
+        self.assertEqual(set_temp.call_args.args[2]['cooltemp'], COOL_OFF_PEAK_TEMP)
+
+    def test_tracks_when_compressor_started(self):
+        data = make_data()
+        run_thermo_task(data, OFF_PEAK_NOW, state=2)
+        run_thermo_task(data, OFF_PEAK_NOW + timedelta(seconds=30), state=2)
+        self.assertEqual(data.on_since, OFF_PEAK_NOW)
+        run_thermo_task(data, OFF_PEAK_NOW + timedelta(seconds=60), state=0)
+        self.assertIsNone(data.on_since)
+
+    def test_tracks_compressor_even_when_thermostat_schedule_on(self):
+        data = make_data()
+        run_thermo_task(data, OFF_PEAK_NOW, state=2, schedule_on=1)
+        self.assertEqual(data.on_since, OFF_PEAK_NOW)
+
+    def test_stays_at_peak_when_compressor_starts_at_peak_temp(self):
+        # Peak is forced with the compressor idle; once the hold ends the house is warm enough that the
+        # compressor starts at the peak setpoint. That must not switch back to the schedule temp.
+        data = make_data()
+        first, _ = run_thermo_task(data, PEAK_NOW, solar=(1.0, 0.0))
+        self.assertEqual(first.call_args.args[2]['cooltemp'], COOL_PEAK_TEMP)
+        second, _ = run_thermo_task(data, PEAK_NOW + timedelta(seconds=400), state=2, solar=(1.0, 5.0))
+        second.assert_not_called()
+        self.assertTrue(data.at_peak)
+
+    def test_update_sent_during_hold_counts_as_peak(self):
+        # Peak is forced in cool mode, then the thermostat is switched to heat during the hold, so the heat peak
+        # temp is sent. A heating cycle that then starts must not switch back to the schedule temp.
+        data = make_data()
+        run_thermo_task(data, PEAK_NOW, solar=(1.0, 0.0))
+        held, _ = run_thermo_task(data, PEAK_NOW + timedelta(seconds=60), mode=1, solar=(1.0, 0.0))
+        self.assertEqual(held.call_args.args[2]['heattemp'], HEAT_PEAK_TEMP)
+        self.assertTrue(data.at_peak)
+        after, _ = run_thermo_task(data, PEAK_NOW + timedelta(seconds=400), mode=1, state=1, solar=(1.0, 5.0))
+        after.assert_not_called()
+
+    def test_peak_ignored_without_peak_temp(self):
+        with self.assertLogs('thermo', logging.WARNING) as logs:
+            schedule, _ = load_schedule(self.write_schedule(
+                {'all': season('01/01', cool=week({0: 75}), peak=[(1500, 1900)])}))
+        self.assertEqual(logs.output, ['WARNING:thermo:all cool schedule has no peak temp, '
+                                       'so its peak periods will be ignored'])
+        data = main.Data(logging.getLogger('test.thermo'), {'url': 'http://thermo', 'schedule': schedule[0]['schedule']},
+                         THRESHOLDS)
+        set_temp, _ = run_thermo_task(data, datetime(2021, 10, 4, 16, 0), solar=(0.0, 5.0))
+        self.assertEqual(set_temp.call_args.args[2]['cooltemp'], 75)
+
+    def test_rejected_update_is_logged_without_traceback(self):
+        data = make_data()
+        with self.assertLogs('test.thermo', logging.ERROR) as logs:
+            run_thermo_task(data, OFF_PEAK_NOW, set_temp_effect=main.ThermostatRejected('thermostat rejected update: x'))
+        self.assertEqual(logs.output, ['ERROR:test.thermo:thermostat rejected update: x'])
+        self.assertIsNone(logs.records[0].exc_info)
+        self.assertEqual(data.state, ())
 
 
 def ok_resp():
-    return MagicMock()
+    resp = MagicMock()
+    resp.json.return_value = {'success': True}
+    return resp
 
 
 def info_resp(**info):
@@ -451,6 +532,27 @@ class TestSetTemp(TestCase):
         self.assertEqual(str(exc), 'failed to set new state: down')
         self.assertEqual(post_fn.call_count, 3)
 
+    def test_rejection_is_raised_without_retry(self):
+        rejected = MagicMock()
+        rejected.json.return_value = {'error': True, 'reason': 'setpoints too close'}
+        post_fn, get_fn, _, exc = self._call(self.COOL, [rejected])
+        self.assertIsInstance(exc, main.ThermostatRejected)
+        self.assertEqual(str(exc), 'thermostat rejected update: setpoints too close')
+        post_fn.assert_called_once()
+        get_fn.assert_not_called()
+
+    def test_rejection_without_reason(self):
+        rejected = MagicMock()
+        rejected.json.return_value = {'error': True}
+        _, _, _, exc = self._call(self.COOL, [rejected])
+        self.assertEqual(str(exc), 'thermostat rejected update: no reason given')
+
+    def test_non_json_post_body_is_accepted(self):
+        resp = MagicMock()
+        resp.json.side_effect = requests.JSONDecodeError('Expecting value', '', 0)
+        _, _, _, exc = self._call(self.COOL, [resp], [info_resp(heattemp=60.0, cooltemp=74.0)])
+        self.assertIsNone(exc)
+
     def test_equiv_temps_rounds_to_tenths(self):
         self.assertTrue(main._equiv_temps(74, 74.0))
         self.assertTrue(main._equiv_temps(74, 74.04))
@@ -460,9 +562,10 @@ class TestSetTemp(TestCase):
 class TestGetSolarProdCons(TestCase):
     DB = {'host': 'timescaledb', 'port': 5433, 'dbname': 'solar', 'user': 'telegraf', 'password': 'pw'}
 
-    def _call(self, db=DB, row=(6500.0, 2500.0), connect_effect=None):
+    def _call(self, db=DB, row=(6500.0, 2500.0), connect_effect=None, data=None):
         settings = {} if db is None else {'timescaledb': db}
-        data = main.Data(logging.getLogger('test.solar'), {'url': None, 'schedule': []}, settings)
+        if data is None:
+            data = main.Data(logging.getLogger('test.solar'), {'url': None, 'schedule': []}, settings)
         with patch('main.psycopg.connect', side_effect=connect_effect) as connect:
             conn = connect.return_value.__enter__.return_value
             conn.execute.return_value.fetchone.return_value = row
@@ -472,7 +575,7 @@ class TestGetSolarProdCons(TestCase):
         result, connect = self._call()
         self.assertEqual(result, (6.5, 2.5))
         connect.assert_called_once_with(host='timescaledb', port=5433, dbname='solar', user='telegraf', password='pw',
-                                        connect_timeout=3)
+                                        connect_timeout=3, options='-c statement_timeout=3000')
         connect.return_value.__enter__.return_value.execute.assert_called_once_with(main.SOLAR_PROD_QUERY)
 
     def test_port_defaults_to_5432(self):
@@ -483,18 +586,29 @@ class TestGetSolarProdCons(TestCase):
     def test_no_recent_data(self):
         with self.assertLogs('test.solar', logging.ERROR):
             result, _ = self._call(row=(None, None))
-        self.assertEqual(result, (0, 0))
+        self.assertIsNone(result)
 
     def test_connection_failure(self):
         with self.assertLogs('test.solar', logging.ERROR):
             result, _ = self._call(connect_effect=psycopg.OperationalError('down'))
-        self.assertEqual(result, (0, 0))
+        self.assertIsNone(result)
 
     def test_missing_settings(self):
         with self.assertLogs('test.solar', logging.ERROR):
             result, connect = self._call(db=None)
-        self.assertEqual(result, (0, 0))
+        self.assertIsNone(result)
         connect.assert_not_called()
+
+    def test_outage_logged_once_then_recovery(self):
+        data = main.Data(logging.getLogger('test.solar'), {'url': None, 'schedule': []}, {'timescaledb': self.DB})
+        down = psycopg.OperationalError('down')
+        with self.assertLogs('test.solar', logging.DEBUG) as logs:
+            self._call(connect_effect=down, data=data)
+            self._call(connect_effect=down, data=data)
+            result, _ = self._call(data=data)
+        self.assertEqual(result, (6.5, 2.5))
+        self.assertEqual([r.levelname for r in logs.records], ['ERROR', 'DEBUG', 'INFO'])
+        self.assertIn('available again', logs.records[2].getMessage())
 
 
 class TestActiveScheduleEdges(ScheduleFileMixin, TestCase):
@@ -514,16 +628,37 @@ class TestActiveScheduleEdges(ScheduleFileMixin, TestCase):
         self.assertFalse(sched['is_peak'])
 
     def test_morning_after_holiday_uses_holiday_last_temp(self):
-        # Weekday's last temp would be 68; the holiday's last temp is 104
+        # Weekday's last temp would be 68; the holiday's last temp is 104. is_holiday describes the day used.
         sched = self._active(datetime(2021, 6, 1, 1, 0))
         self.assertEqual(sched['temp'], 104)
-        self.assertFalse(sched['is_holiday'])
+        self.assertTrue(sched['is_holiday'])
 
     def test_new_years_day(self):
         # Jan 1 2021 is a Friday holiday in the winter season (which started the previous Oct 1)
         self.assertEqual(self._active(datetime(2021, 1, 1, 0, 20))['temp'], 230)
         # Before the holiday's first entry (00:10), Thursday Dec 31's last weekday temp applies
-        self.assertEqual(self._active(datetime(2021, 1, 1, 0, 5))['temp'], 212)
+        sched = self._active(datetime(2021, 1, 1, 0, 5))
+        self.assertEqual(sched['temp'], 212)
+        self.assertFalse(sched['is_holiday'])
+
+    def test_holiday_without_holiday_schedule_uses_weekday(self):
+        path = self.write_schedule({'all': season('01/01', heat=week({600: 64, 1800: 70}))})
+        schedule, _ = load_schedule(path)
+        sched = _get_active_schedule(self.us_holidays, self.settings, schedule[0]['schedule'],
+                                     datetime(2021, 5, 31, 12, 0), 'heat')
+        self.assertEqual(sched['temp'], 64)
+        self.assertTrue(sched['is_holiday'])
+        # The morning after, before 06:00, rolls back to the holiday's (weekday) last temp
+        sched = _get_active_schedule(self.us_holidays, self.settings, schedule[0]['schedule'],
+                                     datetime(2021, 6, 1, 1, 0), 'heat')
+        self.assertEqual(sched['temp'], 70)
+
+    def test_season_without_peak_list(self):
+        path = self.write_schedule({'all': season('01/01', heat=dict(week({600: 64}), peak=60), peak=None)})
+        schedule, _ = load_schedule(path)
+        self.assertEqual(schedule[0]['schedule'][0]['peak'], [])
+        sched = _get_active_schedule(self.us_holidays, self.settings, schedule[0]['schedule'], PEAK_NOW, 'heat')
+        self.assertFalse(sched['is_peak'])
 
     def test_mode_without_schedule_returns_none(self):
         path = self.write_schedule({'all': season('01/01', heat=dict(week({600: 64}), peak=60))})
@@ -598,8 +733,7 @@ class TestInterval(TestCase):
             ({'interval': 7}, {'second': '*/6'}, 'interval was adjusted to 6'),
             ({'interval': 45}, {'minute': '*'}, 'interval was adjusted to 60'),
             ({'interval': 60}, {'minute': '*'}, None),
-            # Pins current behavior: values over 60 are clamped to 60 without a warning
-            ({'interval': 90}, {'minute': '*'}, None),
+            ({'interval': 90}, {'minute': '*'}, 'interval was adjusted to 60'),
             ({}, {'minute': '*'}, None),
         ]
         for settings, cron_kwargs, warning in cases:
@@ -612,3 +746,26 @@ class TestInterval(TestCase):
                     with self.assertNoLogs('thermo', logging.WARNING):
                         cron = self._main(settings)
                 cron.assert_called_once_with(**cron_kwargs)
+
+
+class TestLogLevel(TestCase):
+    def setUp(self):
+        log = logging.getLogger('thermo')
+        self.addCleanup(log.setLevel, log.level)
+
+    def _main(self, loglevel):
+        with patch.dict(os.environ, {'LOGLEVEL': loglevel}), \
+                patch('main.load_schedule', return_value=([], {})), \
+                patch('main.BlockingScheduler'), \
+                patch('main.signal.signal'):
+            main.main()
+        return logging.getLogger('thermo').level
+
+    def test_level_name_is_case_insensitive(self):
+        self.assertEqual(self._main('debug'), logging.DEBUG)
+
+    def test_invalid_level_falls_back_to_info(self):
+        with self.assertLogs('thermo', logging.WARNING) as logs:
+            level = self._main('LOUD')
+        self.assertEqual(level, logging.INFO)
+        self.assertEqual(logs.output, ["WARNING:thermo:invalid LOGLEVEL 'LOUD', using INFO"])
