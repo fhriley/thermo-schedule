@@ -3,6 +3,7 @@ import datetime
 import logging
 import os
 import signal
+import threading
 from time import sleep
 from typing import Optional, Tuple
 from urllib.parse import urljoin
@@ -12,9 +13,7 @@ import psycopg
 import requests
 import yaml
 from apscheduler.schedulers.blocking import BlockingScheduler
-from apscheduler.triggers.combining import OrTrigger
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.date import DateTrigger
 
 SOLAR_PROD_QUERY = """SELECT avg(production_w), avg(consumption_w)
       FROM meters
@@ -240,6 +239,9 @@ class Data:
         # Whether the last setpoint sent was a peak override
         self.at_peak = False
         self.solar_failing = False
+        # run_job uses these so runs never overlap and a tick during a run isn't lost
+        self.lock = threading.Lock()
+        self.rerun = threading.Event()
 
 
 def get_solar_prod_cons(data: Data) -> Optional[tuple[float, float]]:
@@ -390,6 +392,19 @@ def thermo_task(data: Data):
         data.log.exception('unknown failure')
 
 
+def run_job(data: Data):
+    """Run thermo_task without overlapping; a tick that arrives mid-run causes one more run right after."""
+    data.rerun.set()
+    while data.rerun.is_set():
+        if not data.lock.acquire(blocking=False):
+            return  # the running job will see rerun and go again
+        try:
+            data.rerun.clear()
+            thermo_task(data)
+        finally:
+            data.lock.release()
+
+
 def main():
     log = logging.getLogger('thermo')
     level_name = os.environ.get('LOGLEVEL', 'INFO').upper()
@@ -410,16 +425,15 @@ def main():
     else:
         cron = CronTrigger(minute='*')
 
-    trigger = OrTrigger([DateTrigger(), cron])
-
     scheduler = BlockingScheduler({
         'apscheduler.job_defaults.coalesce': 'true',
-        'apscheduler.job_defaults.max_instances': '1',
+        # run_job prevents overlapping runs, so let overlapping ticks reach it instead of being skipped
+        'apscheduler.job_defaults.max_instances': '3',
     })
 
     for thermo in thermostats:
         data = Data(log, thermo, settings)
-        scheduler.add_job(thermo_task, trigger, args=[data])
+        scheduler.add_job(run_job, cron, args=[data], next_run_time=datetime.datetime.now())
 
     # Python running as PID 1 in the container ignores SIGTERM by default, so podman would wait and then SIGKILL
     def handle_sigterm(signum, frame):

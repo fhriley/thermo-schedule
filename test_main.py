@@ -2,6 +2,7 @@ import datetime as dt_module
 import logging
 import os
 import tempfile
+import threading
 from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest import TestCase
@@ -178,6 +179,7 @@ class TestMain(TestCase):
         ]
         with patch('main.load_schedule', return_value=(thermostats, settings)), \
                 patch('main.BlockingScheduler') as scheduler_cls, \
+                patch('main.CronTrigger') as cron, \
                 patch('main.thermo_task') as thermo_task:
             main.main()
             # Run each registered job the way APScheduler would
@@ -187,6 +189,9 @@ class TestMain(TestCase):
 
         uris = [call.args[0].uri for call in thermo_task.call_args_list]
         self.assertEqual(uris, ['http://thermo-a', 'http://thermo-b'])
+        for call in scheduler_cls.return_value.add_job.call_args_list:
+            self.assertEqual(call.args, (main.run_job, cron.return_value))
+            self.assertIsInstance(call.kwargs['next_run_time'], datetime)
 
     def test_sigterm_shuts_down_scheduler(self):
         schedule, settings = load_schedule('test.yaml')
@@ -201,6 +206,83 @@ class TestMain(TestCase):
         handler = signal_fn.call_args.args[1]
         handler(main.signal.SIGTERM, None)
         scheduler.shutdown.assert_called_once_with(wait=False)
+
+
+class TestRunJob(TestCase):
+    def setUp(self):
+        self.data = make_data()
+
+    def test_single_tick_runs_once(self):
+        with patch('main.thermo_task') as thermo_task:
+            main.run_job(self.data)
+        thermo_task.assert_called_once_with(self.data)
+
+    def test_tick_during_run_causes_one_more_run(self):
+        for ticks_during_first_run in (1, 2):
+            with self.subTest(ticks=ticks_during_first_run):
+                data = make_data()
+                calls = []
+
+                def task(d):
+                    calls.append(d)
+                    if len(calls) == 1:
+                        for _ in range(ticks_during_first_run):
+                            main.run_job(d)  # can't get the lock, so it only requests a rerun
+
+                with patch('main.thermo_task', side_effect=task):
+                    main.run_job(data)
+                self.assertEqual(len(calls), 2)
+
+    def test_tick_from_another_thread_is_not_lost(self):
+        started, release = threading.Event(), threading.Event()
+        calls = []
+
+        def task(d):
+            calls.append(d)
+            if len(calls) == 1:
+                started.set()
+                release.wait(5)
+
+        with patch('main.thermo_task', side_effect=task):
+            first = threading.Thread(target=main.run_job, args=(self.data,))
+            first.start()
+            self.assertTrue(started.wait(5))
+            main.run_job(self.data)  # returns immediately; the first job is still running
+            self.assertEqual(len(calls), 1)
+            release.set()
+            first.join(5)
+        self.assertFalse(first.is_alive())
+        self.assertEqual(len(calls), 2)
+
+    def test_tick_just_before_lock_release_is_not_lost(self):
+        # A tick arrives after the running job's last look at rerun but before it releases the lock: the tick
+        # can't get the lock, so the running job must notice the request after releasing.
+        data = self.data
+        real_lock = data.lock
+
+        class TickOnFirstRelease:
+            ticked = False
+
+            def acquire(self, blocking=True):
+                return real_lock.acquire(blocking)
+
+            def release(self):
+                if not TickOnFirstRelease.ticked:
+                    TickOnFirstRelease.ticked = True
+                    main.run_job(data)
+                real_lock.release()
+
+        data.lock = TickOnFirstRelease()
+        with patch('main.thermo_task') as thermo_task:
+            main.run_job(data)
+        self.assertEqual(thermo_task.call_count, 2)
+
+    def test_lock_released_when_task_raises(self):
+        with patch('main.thermo_task', side_effect=[RuntimeError('boom'), None]) as thermo_task:
+            with self.assertRaises(RuntimeError):
+                main.run_job(self.data)
+            main.run_job(self.data)
+        self.assertEqual(thermo_task.call_count, 2)
 
 
 class TestThermoTaskPeak(TestCase):
