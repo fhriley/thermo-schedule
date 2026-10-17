@@ -102,7 +102,6 @@ thermostats:
 settings:
   interval: 30
   holidays: ["new year", "memorial day", "labor day", "independence day", "thanksgiving", "christmas"]
-  fan_mins_per_hour: 10
   solar_prod_thresh:
     heat: 1.0
     cool: 4.0

@@ -27,7 +27,6 @@ Environment variables: `SCHEDULE` (config path, default `/config/schedule.yaml`)
 - **`thermo_task`** runs every `interval` seconds per thermostat via APScheduler (`OrTrigger` of an immediate `DateTrigger` + cron; interval is clamped to ≤60 and adjusted to divide 60). It does nothing if the thermostat's own schedule is enabled or mode is off/auto (only heat=1 / cool=2 are handled). During peak it overrides the setpoint with the peak temp when solar is insufficient: if the compressor is running, compare `production - consumption` to `consumption_thresh`; if idle, compare `production` to `solar_prod_thresh`. After forcing peak, it holds peak for at least `min_comp_time_s` (tracked via `Data.last_off`) to avoid short-cycling the compressor.
 - **`_set_temp`** POSTs the new state, waits, then re-reads `/query/info` to verify the setpoint (retries 3×).
 - **`get_solar_prod_cons`** connects to TimescaleDB (`settings.timescaledb`: host/port/dbname/user/password) per call and averages `production_w`/`consumption_w` from the `meters` hypertable (written by telegraf every ~10s) over the last 10 minutes; values are divided by 1000 (W → kW). Failures are logged and treated as 0 production.
-- Fan-minutes-per-hour logic is still computed but the fan control in the API call is commented out (intentionally disabled).
 
 ## Tests
 
