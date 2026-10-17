@@ -207,10 +207,11 @@ class Data:
         self.uri: str = thermo['url']
         self.timeout = float(settings.get('timeout', 3))
         self.state: tuple = ()
-        self.solar_prod_thresh: dict = settings.get('solar_prod_thresh') or 100.0
-        self.consumption_thresh: dict = settings.get('consumption_thresh') or 0.0
+        self.solar_prod_thresh: dict = settings.get('solar_prod_thresh') or {}
+        self.consumption_thresh: dict = settings.get('consumption_thresh') or {}
         self.last_off: datetime.datetime = datetime.datetime(1900, 1, 1)
-        self.min_comp_time_s = settings.get('min_comp_time_s') or 300.0
+        min_comp_time_s = settings.get('min_comp_time_s')
+        self.min_comp_time_s = 300.0 if min_comp_time_s is None else float(min_comp_time_s)
 
 
 def get_solar_prod_cons(data: Data) -> tuple[float, float]:
@@ -280,7 +281,7 @@ def thermo_task(data: Data):
         set_to_peak = False
 
         if is_peak:
-            comp_s = (now - data.last_off).seconds
+            comp_s = int((now - data.last_off).total_seconds())
             if comp_s < data.min_comp_time_s:
                 data.log.info(
                     f'compressor off for {comp_s} < {data.min_comp_time_s}, staying at peak temp: {peak_temp}')
@@ -363,7 +364,7 @@ def main():
 
     for thermo in thermostats:
         data = Data(log, thermo, settings)
-        scheduler.add_job(lambda: thermo_task(data), trigger)
+        scheduler.add_job(thermo_task, trigger, args=[data])
 
     scheduler.start()
 

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A single-process Python service that drives one or more Radio Thermostat–style Wi-Fi thermostats over their local HTTP API (`GET /query/info`, `POST /control`) according to a YAML schedule, with time-of-use "peak" handling that uses live solar production/consumption from TimescaleDB. It runs as a container (Python 3.10, `TZ=America/Phoenix`) on the `pods` podman network, managed by an Ansible-generated quadlet (`/etc/containers/systemd/container-thermo-schedule.container`, image `docker.io/fhriley/thermo-schedule`), and reads its config from `/config/schedule.yaml`.
+A single-process Python service that drives one or more Venstar Wi-Fi thermostats over their local HTTP API (`GET /query/info`, `POST /control`) according to a YAML schedule, with time-of-use "peak" handling that uses live solar production/consumption from TimescaleDB. It runs as a container (Python 3.10, `TZ=America/Phoenix`) on the `pods` podman network, managed by an Ansible-generated quadlet (`/etc/containers/systemd/container-thermo-schedule.container`, image `docker.io/fhriley/thermo-schedule`), and reads its config from `/config/schedule.yaml`.
 
 ## Commands
 
@@ -30,4 +30,4 @@ Environment variables: `SCHEDULE` (config path, default `/config/schedule.yaml`)
 
 ## Tests
 
-`test_main.py` uses `test.yaml`, which has deliberately distinctive setpoint values (50, 86, 104, …) so tests can assert which schedule slot was chosen. It covers schedule selection, season/day rollover, holidays, and peak detection — not `thermo_task` or the network code.
+`test_main.py` uses `test.yaml`, which has deliberately distinctive setpoint values (50, 86, 104, …) so tests can assert which schedule slot was chosen. It covers schedule selection, season/day rollover, holidays, and peak detection. `TestThermoTaskPeak` runs `thermo_task` with the thermostat HTTP calls, `get_solar_prod_cons`, `_set_temp`, and `main.datetime` patched (a `SimpleNamespace` whose `datetime.now` is fixed) to test the peak/compressor-hold decisions; `TestMain` checks job registration with a patched `BlockingScheduler`. `test.yaml` has no threshold settings; `TestThermoTaskPeak` adds them unless a test passes `settings_overrides`.
