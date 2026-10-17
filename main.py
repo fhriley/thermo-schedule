@@ -7,7 +7,7 @@ from typing import Optional, Tuple
 from urllib.parse import urljoin
 
 import holidays
-import influxdb_client
+import psycopg
 import requests
 import yaml
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -15,12 +15,9 @@ from apscheduler.triggers.combining import OrTrigger
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
-SOLAR_PROD_QUERY = '''from(bucket: "solar")
-      |> range(start: -2h)
-      |> filter(fn: (r) => r["_measurement"] == "realtime_energy")
-      |> filter(fn: (r) => r["_field"] == "production" or r["_field"] == "consumption")
-      |> timedMovingAverage(every: %ss, period: 10m)
-      |> last()'''
+SOLAR_PROD_QUERY = """SELECT avg(production_w), avg(consumption_w)
+      FROM meters
+      WHERE time > now() - interval '10 minutes'"""
 
 
 class Temperature:
@@ -226,17 +223,14 @@ def get_solar_prod_cons(data: Data) -> tuple[float, float]:
     consumption = 0
 
     try:
-        influxdb = data.settings['influxdb']
-        interval = data.settings['interval'] // 2
-        query = SOLAR_PROD_QUERY % interval
-        result = influxdb['query_api'].query(org=influxdb['org'], query=query)
-        for table in result:
-            for record in table.records:
-                if record.get_field() == 'consumption':
-                    consumption = record.get_value() / 1000.0
-                    continue
-                if record.get_field() == 'production':
-                    solar_prod = record.get_value() / 1000.0
+        db = data.settings['timescaledb']
+        with psycopg.connect(host=db['host'], port=db.get('port', 5432), dbname=db['dbname'], user=db['user'],
+                             password=db['password'], connect_timeout=int(data.timeout)) as conn:
+            row = conn.execute(SOLAR_PROD_QUERY).fetchone()
+        if row[0] is None or row[1] is None:
+            raise Exception('no recent meter data')
+        solar_prod = row[0] / 1000.0
+        consumption = row[1] / 1000.0
     except Exception:
         data.log.exception('failed to get solar production')
 
@@ -385,11 +379,6 @@ def main():
         cron = CronTrigger(second=f'*/{interval_secs}')
     else:
         cron = CronTrigger(minute='*')
-
-    influxdb = settings['influxdb']
-    client = influxdb_client.InfluxDBClient(url=influxdb['url'], token=influxdb['token'], org=influxdb['org'],
-                                            verify_ssl=False)
-    influxdb['query_api'] = client.query_api()
 
     trigger = OrTrigger([DateTrigger(), cron])
 
