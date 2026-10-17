@@ -1,5 +1,4 @@
 pyyaml==6.0.3
 holidays==0.106
 requests==2.34.2
-apscheduler==3.11.3
 psycopg[binary]==3.3.6

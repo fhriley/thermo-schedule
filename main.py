@@ -4,6 +4,7 @@ import logging
 import os
 import signal
 import threading
+import time
 from time import sleep
 from typing import Optional, Tuple
 from urllib.parse import urljoin
@@ -12,8 +13,6 @@ import holidays
 import psycopg
 import requests
 import yaml
-from apscheduler.schedulers.blocking import BlockingScheduler
-from apscheduler.triggers.cron import CronTrigger
 
 SOLAR_PROD_QUERY = """SELECT avg(production_w), avg(consumption_w)
       FROM meters
@@ -239,9 +238,6 @@ class Data:
         # Whether the last setpoint sent was a peak override
         self.at_peak = False
         self.solar_failing = False
-        # run_job uses these so runs never overlap and a tick during a run isn't lost
-        self.lock = threading.Lock()
-        self.rerun = threading.Event()
 
 
 def get_solar_prod_cons(data: Data) -> Optional[tuple[float, float]]:
@@ -392,17 +388,29 @@ def thermo_task(data: Data):
         data.log.exception('unknown failure')
 
 
-def run_job(data: Data):
-    """Run thermo_task without overlapping; a tick that arrives mid-run causes one more run right after."""
-    data.rerun.set()
-    while data.rerun.is_set():
-        if not data.lock.acquire(blocking=False):
-            return  # the running job will see rerun and go again
+def run_thermostat(data: Data, interval: int, stop: threading.Event):
+    """Run thermo_task now and then on every wall-clock multiple of `interval` seconds until `stop` is set.
+
+    Schedule changes happen on whole minutes, so `interval` must divide 60. A run that overruns a boundary is
+    followed by one immediate catch-up run rather than skipping that boundary.
+    """
+    next_tick = time.time()
+    while True:
+        # Event.wait can return a little early, so keep waiting until the boundary is reached
+        while (delay := next_tick - time.time()) > 0:
+            if stop.wait(delay):
+                return
+        if stop.is_set():
+            return
+        # thermo_task handles its own errors; this keeps an unexpected one from ending this thermostat's loop
         try:
-            data.rerun.clear()
             thermo_task(data)
-        finally:
-            data.lock.release()
+        except Exception:
+            data.log.exception('thermo task crashed')
+        next_tick = (next_tick // interval + 1) * interval
+        now = time.time()
+        if next_tick < now:
+            next_tick = now // interval * interval
 
 
 def main():
@@ -415,34 +423,27 @@ def main():
     log.setLevel(level)
     thermostats, settings = load_schedule(os.environ.get('SCHEDULE', '/config/schedule.yaml'))
     interval_secs_requested = int(settings.get('interval', 60))
+    # Must divide 60 so every minute boundary (when schedule changes happen) gets a run
     interval_secs = 60 // int(round(60 / min(interval_secs_requested, 60)))
 
     if interval_secs_requested != interval_secs:
         log.warning(f'interval was adjusted to {interval_secs}')
 
-    if interval_secs < 60:
-        cron = CronTrigger(second=f'*/{interval_secs}')
-    else:
-        cron = CronTrigger(minute='*')
-
-    scheduler = BlockingScheduler({
-        'apscheduler.job_defaults.coalesce': 'true',
-        # run_job prevents overlapping runs, so let overlapping ticks reach it instead of being skipped
-        'apscheduler.job_defaults.max_instances': '3',
-    })
-
-    for thermo in thermostats:
-        data = Data(log, thermo, settings)
-        scheduler.add_job(run_job, cron, args=[data], next_run_time=datetime.datetime.now())
+    stop = threading.Event()
 
     # Python running as PID 1 in the container ignores SIGTERM by default, so podman would wait and then SIGKILL
     def handle_sigterm(signum, frame):
         log.info('received SIGTERM, shutting down')
-        scheduler.shutdown(wait=False)
+        stop.set()
 
     signal.signal(signal.SIGTERM, handle_sigterm)
 
-    scheduler.start()
+    for thermo in thermostats:
+        data = Data(log, thermo, settings)
+        threading.Thread(target=run_thermostat, args=(data, interval_secs, stop), name=f'thermo {data.uri}',
+                         daemon=True).start()
+
+    stop.wait()
 
 
 if __name__ == "__main__":

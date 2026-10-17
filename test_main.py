@@ -170,119 +170,138 @@ class Test(TestCase):
             self.assertEqual(new_sched['is_peak'], is_peak, f'test {ii} failed')
 
 
+def run_main(settings=None, thermostats=None):
+    """Run main() with thread creation and the stop event mocked; returns (Thread mock, stop mock, signal mock)."""
+    if thermostats is None:
+        schedule, _ = load_schedule('test.yaml')
+        thermostats = [{'url': 'http://thermo', 'schedule': schedule[0]['schedule']}]
+    stop = MagicMock()
+    with patch('main.load_schedule', return_value=(thermostats, settings or {})), \
+            patch('main.threading.Thread') as thread_cls, \
+            patch('main.threading.Event', return_value=stop), \
+            patch('main.signal.signal') as signal_fn:
+        main.main()
+    return thread_cls, stop, signal_fn
+
+
 class TestMain(TestCase):
-    def test_each_job_gets_its_own_thermostat(self):
+    def test_each_thermostat_gets_its_own_thread(self):
         schedule, settings = load_schedule('test.yaml')
         thermostats = [
             {'url': 'http://thermo-a', 'schedule': schedule[0]['schedule']},
             {'url': 'http://thermo-b', 'schedule': schedule[0]['schedule']},
         ]
-        with patch('main.load_schedule', return_value=(thermostats, settings)), \
-                patch('main.BlockingScheduler') as scheduler_cls, \
-                patch('main.CronTrigger') as cron, \
-                patch('main.thermo_task') as thermo_task:
-            main.main()
-            # Run each registered job the way APScheduler would
-            for call in scheduler_cls.return_value.add_job.call_args_list:
-                func = call.args[0]
-                func(*call.kwargs.get('args', ()), **call.kwargs.get('kwargs', {}))
+        thread_cls, stop, _ = run_main(settings, thermostats)
 
-        uris = [call.args[0].uri for call in thermo_task.call_args_list]
-        self.assertEqual(uris, ['http://thermo-a', 'http://thermo-b'])
-        for call in scheduler_cls.return_value.add_job.call_args_list:
-            self.assertEqual(call.args, (main.run_job, cron.return_value))
-            self.assertIsInstance(call.kwargs['next_run_time'], datetime)
+        self.assertEqual(thread_cls.call_count, 2)
+        for call, uri in zip(thread_cls.call_args_list, ['http://thermo-a', 'http://thermo-b']):
+            self.assertIs(call.kwargs['target'], main.run_thermostat)
+            data, interval, thread_stop = call.kwargs['args']
+            self.assertEqual(data.uri, uri)
+            self.assertEqual(interval, 10)
+            self.assertIs(thread_stop, stop)
+            self.assertTrue(call.kwargs['daemon'])
+        self.assertEqual(thread_cls.return_value.start.call_count, 2)
+        stop.wait.assert_called_once_with()
 
-    def test_sigterm_shuts_down_scheduler(self):
-        schedule, settings = load_schedule('test.yaml')
-        with patch('main.load_schedule', return_value=(schedule, settings)), \
-                patch('main.BlockingScheduler') as scheduler_cls, \
-                patch('main.signal.signal') as signal_fn:
-            main.main()
-
+    def test_sigterm_sets_stop(self):
+        _, stop, signal_fn = run_main()
         signal_fn.assert_called_once_with(main.signal.SIGTERM, ANY)
-        scheduler = scheduler_cls.return_value
-        scheduler.shutdown.assert_not_called()
+        stop.set.assert_not_called()
         handler = signal_fn.call_args.args[1]
         handler(main.signal.SIGTERM, None)
-        scheduler.shutdown.assert_called_once_with(wait=False)
+        stop.set.assert_called_once_with()
 
 
-class TestRunJob(TestCase):
-    def setUp(self):
-        self.data = make_data()
+# A Unix time on a whole minute, so BASE + 30 and BASE + 60 are wall-clock :30 and :00
+BASE = 60 * 28_333_334
 
-    def test_single_tick_runs_once(self):
+
+class FakeClock:
+    def __init__(self, now):
+        self.now = now
+
+    def time(self):
+        return self.now
+
+
+class FakeStop:
+    """A stop event whose wait() advances the fake clock; it reports stop on wait number `stop_on_wait`."""
+
+    def __init__(self, clock, stop_on_wait, early_waits=()):
+        self.clock = clock
+        self.stop_on_wait = stop_on_wait
+        self.early_waits = early_waits  # wait numbers that return 0.01s before their timeout
+        self.waits = []
+
+    def wait(self, timeout):
+        self.waits.append(timeout)
+        if len(self.waits) >= self.stop_on_wait:
+            return True
+        self.clock.now += timeout - (0.01 if len(self.waits) in self.early_waits else 0)
+        return False
+
+    def is_set(self):
+        return False
+
+
+class TestRunThermostat(TestCase):
+    def _run(self, start, durations=(), stop_on_wait=3, early_waits=(), interval=30, task_effect=None):
+        """Run run_thermostat on a fake clock; returns the fake-clock time at which each run started."""
+        clock = FakeClock(start)
+        stop = FakeStop(clock, stop_on_wait, early_waits)
+        starts = []
+
+        def task(data):
+            starts.append(clock.now)
+            if task_effect is not None:
+                task_effect(len(starts))
+            if len(starts) <= len(durations):
+                clock.now += durations[len(starts) - 1]
+
+        with patch('main.time.time', clock.time), patch('main.thermo_task', side_effect=task):
+            main.run_thermostat(make_data(), interval, stop)
+        return starts
+
+    def test_runs_now_then_on_wall_clock_boundaries(self):
+        self.assertEqual(self._run(BASE + 10.4), [BASE + 10.4, BASE + 30, BASE + 60])
+
+    def test_minute_interval(self):
+        self.assertEqual(self._run(BASE + 10.4, interval=60), [BASE + 10.4, BASE + 60, BASE + 120])
+
+    def test_overrun_gets_one_catch_up_run(self):
+        # The first run lasts past the :30 boundary, so it runs again immediately, then back on boundaries
+        # The catch-up run doesn't wait, so stop on the second wait
+        self.assertEqual(self._run(BASE + 10.4, durations=[45], stop_on_wait=2), [BASE + 10.4, BASE + 55.4, BASE + 60])
+
+    def test_several_missed_boundaries_get_only_one_catch_up_run(self):
+        self.assertEqual(self._run(BASE + 10.4, durations=[100], stop_on_wait=2),
+                         [BASE + 10.4, BASE + 110.4, BASE + 120])
+
+    def test_early_wakeup_waits_until_boundary(self):
+        stop_on_wait = 4  # one extra wait for the early wakeup
+        starts = self._run(BASE + 10.4, stop_on_wait=stop_on_wait, early_waits=(1,))
+        self.assertEqual(starts, [BASE + 10.4, BASE + 30, BASE + 60])
+
+    def test_stop_during_wait_ends_loop(self):
+        self.assertEqual(self._run(BASE + 10.4, stop_on_wait=1), [BASE + 10.4])
+
+    def test_crash_is_logged_and_loop_continues(self):
+        def crash_first(run):
+            if run == 1:
+                raise RuntimeError('boom')
+
+        with self.assertLogs('test.thermo', logging.ERROR) as logs:
+            starts = self._run(BASE + 10.4, task_effect=crash_first)
+        self.assertEqual(starts, [BASE + 10.4, BASE + 30, BASE + 60])
+        self.assertIn('thermo task crashed', logs.output[0])
+
+    def test_stop_already_set_does_not_run(self):
+        stop = threading.Event()
+        stop.set()
         with patch('main.thermo_task') as thermo_task:
-            main.run_job(self.data)
-        thermo_task.assert_called_once_with(self.data)
-
-    def test_tick_during_run_causes_one_more_run(self):
-        for ticks_during_first_run in (1, 2):
-            with self.subTest(ticks=ticks_during_first_run):
-                data = make_data()
-                calls = []
-
-                def task(d):
-                    calls.append(d)
-                    if len(calls) == 1:
-                        for _ in range(ticks_during_first_run):
-                            main.run_job(d)  # can't get the lock, so it only requests a rerun
-
-                with patch('main.thermo_task', side_effect=task):
-                    main.run_job(data)
-                self.assertEqual(len(calls), 2)
-
-    def test_tick_from_another_thread_is_not_lost(self):
-        started, release = threading.Event(), threading.Event()
-        calls = []
-
-        def task(d):
-            calls.append(d)
-            if len(calls) == 1:
-                started.set()
-                release.wait(5)
-
-        with patch('main.thermo_task', side_effect=task):
-            first = threading.Thread(target=main.run_job, args=(self.data,))
-            first.start()
-            self.assertTrue(started.wait(5))
-            main.run_job(self.data)  # returns immediately; the first job is still running
-            self.assertEqual(len(calls), 1)
-            release.set()
-            first.join(5)
-        self.assertFalse(first.is_alive())
-        self.assertEqual(len(calls), 2)
-
-    def test_tick_just_before_lock_release_is_not_lost(self):
-        # A tick arrives after the running job's last look at rerun but before it releases the lock: the tick
-        # can't get the lock, so the running job must notice the request after releasing.
-        data = self.data
-        real_lock = data.lock
-
-        class TickOnFirstRelease:
-            ticked = False
-
-            def acquire(self, blocking=True):
-                return real_lock.acquire(blocking)
-
-            def release(self):
-                if not TickOnFirstRelease.ticked:
-                    TickOnFirstRelease.ticked = True
-                    main.run_job(data)
-                real_lock.release()
-
-        data.lock = TickOnFirstRelease()
-        with patch('main.thermo_task') as thermo_task:
-            main.run_job(data)
-        self.assertEqual(thermo_task.call_count, 2)
-
-    def test_lock_released_when_task_raises(self):
-        with patch('main.thermo_task', side_effect=[RuntimeError('boom'), None]) as thermo_task:
-            with self.assertRaises(RuntimeError):
-                main.run_job(self.data)
-            main.run_job(self.data)
-        self.assertEqual(thermo_task.call_count, 2)
+            main.run_thermostat(make_data(), 30, stop)
+        thermo_task.assert_not_called()
 
 
 class TestThermoTaskPeak(TestCase):
@@ -799,35 +818,27 @@ class TestLoadSchedule(ScheduleFileMixin, TestCase):
 
 
 class TestInterval(TestCase):
-    def _main(self, settings):
-        with patch('main.load_schedule', return_value=([], settings)), \
-                patch('main.BlockingScheduler'), \
-                patch('main.signal.signal'), \
-                patch('main.CronTrigger') as cron:
-            main.main()
-        return cron
-
     def test_intervals(self):
-        # (settings, expected CronTrigger kwargs, expected warning or None)
+        # (settings, expected interval passed to run_thermostat, expected warning or None)
         cases = [
-            ({'interval': 30}, {'second': '*/30'}, None),
-            ({'interval': 10}, {'second': '*/10'}, None),
-            ({'interval': 7}, {'second': '*/6'}, 'interval was adjusted to 6'),
-            ({'interval': 45}, {'minute': '*'}, 'interval was adjusted to 60'),
-            ({'interval': 60}, {'minute': '*'}, None),
-            ({'interval': 90}, {'minute': '*'}, 'interval was adjusted to 60'),
-            ({}, {'minute': '*'}, None),
+            ({'interval': 30}, 30, None),
+            ({'interval': 10}, 10, None),
+            ({'interval': 7}, 6, 'interval was adjusted to 6'),
+            ({'interval': 45}, 60, 'interval was adjusted to 60'),
+            ({'interval': 60}, 60, None),
+            ({'interval': 90}, 60, 'interval was adjusted to 60'),
+            ({}, 60, None),
         ]
-        for settings, cron_kwargs, warning in cases:
+        for settings, interval, warning in cases:
             with self.subTest(settings=settings):
                 if warning:
                     with self.assertLogs('thermo', logging.WARNING) as logs:
-                        cron = self._main(settings)
+                        thread_cls, _, _ = run_main(settings)
                     self.assertEqual(logs.output, [f'WARNING:thermo:{warning}'])
                 else:
                     with self.assertNoLogs('thermo', logging.WARNING):
-                        cron = self._main(settings)
-                cron.assert_called_once_with(**cron_kwargs)
+                        thread_cls, _, _ = run_main(settings)
+                self.assertEqual(thread_cls.call_args.kwargs['args'][1], interval)
 
 
 class TestLogLevel(TestCase):
@@ -836,11 +847,8 @@ class TestLogLevel(TestCase):
         self.addCleanup(log.setLevel, log.level)
 
     def _main(self, loglevel):
-        with patch.dict(os.environ, {'LOGLEVEL': loglevel}), \
-                patch('main.load_schedule', return_value=([], {})), \
-                patch('main.BlockingScheduler'), \
-                patch('main.signal.signal'):
-            main.main()
+        with patch.dict(os.environ, {'LOGLEVEL': loglevel}):
+            run_main(thermostats=[])
         return logging.getLogger('thermo').level
 
     def test_level_name_is_case_insensitive(self):
