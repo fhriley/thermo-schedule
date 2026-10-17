@@ -2,7 +2,7 @@ import datetime as dt_module
 import logging
 from types import SimpleNamespace
 from unittest import TestCase
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 from datetime import datetime, timedelta
 import holidays
 import main
@@ -98,6 +98,20 @@ class TestMain(TestCase):
 
         uris = [call.args[0].uri for call in thermo_task.call_args_list]
         self.assertEqual(uris, ['http://thermo-a', 'http://thermo-b'])
+
+    def test_sigterm_shuts_down_scheduler(self):
+        schedule, settings = load_schedule('test.yaml')
+        with patch('main.load_schedule', return_value=(schedule, settings)), \
+                patch('main.BlockingScheduler') as scheduler_cls, \
+                patch('main.signal.signal') as signal_fn:
+            main.main()
+
+        signal_fn.assert_called_once_with(main.signal.SIGTERM, ANY)
+        scheduler = scheduler_cls.return_value
+        scheduler.shutdown.assert_not_called()
+        handler = signal_fn.call_args.args[1]
+        handler(main.signal.SIGTERM, None)
+        scheduler.shutdown.assert_called_once_with(wait=False)
 
 
 class TestThermoTaskPeak(TestCase):

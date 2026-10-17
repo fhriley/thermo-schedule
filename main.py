@@ -2,6 +2,7 @@ import bisect
 import datetime
 import logging
 import os
+import signal
 from time import sleep
 from typing import Optional, Tuple
 from urllib.parse import urljoin
@@ -365,6 +366,13 @@ def main():
     for thermo in thermostats:
         data = Data(log, thermo, settings)
         scheduler.add_job(thermo_task, trigger, args=[data])
+
+    # Python running as PID 1 in the container ignores SIGTERM by default, so podman would wait and then SIGKILL
+    def handle_sigterm(signum, frame):
+        log.info('received SIGTERM, shutting down')
+        scheduler.shutdown(wait=False)
+
+    signal.signal(signal.SIGTERM, handle_sigterm)
 
     scheduler.start()
 
