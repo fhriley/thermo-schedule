@@ -30,4 +30,12 @@ Environment variables: `SCHEDULE` (config path, default `/config/schedule.yaml`)
 
 ## Tests
 
-`test_main.py` uses `test.yaml`, which has deliberately distinctive setpoint values (50, 86, 104, …) so tests can assert which schedule slot was chosen. It covers schedule selection, season/day rollover, holidays, and peak detection. `TestThermoTaskPeak` runs `thermo_task` with the thermostat HTTP calls, `get_solar_prod_cons`, `_set_temp`, and `main.datetime` patched (a `SimpleNamespace` whose `datetime.now` is fixed) to test the peak/compressor-hold decisions; `TestMain` checks job registration with a patched `BlockingScheduler`. `test.yaml` has no threshold settings; `TestThermoTaskPeak` adds them unless a test passes `settings_overrides`.
+The checked-in `.venv` is stale, so the easiest way to run tests is inside the built image: `podman run --rm -v $PWD:/src:ro -w /src docker.io/fhriley/thermo-schedule:latest python -m unittest test_main` (add e.g. `test_main.TestSetTemp` for one class).
+
+`test.yaml` has deliberately distinctive setpoint values (50, 86, 104, …) so tests can assert which schedule slot was chosen; the constants at the top of `test_main.py` (`PEAK_NOW`, `COOL_PEAK_TEMP`, …) name the ones the tests rely on. It has no threshold settings, so `make_data()` adds `THRESHOLDS` unless given overrides. Shared helpers:
+
+- `run_thermo_task(data, now, ...)` runs one `thermo_task` cycle with the thermostat GET, `get_solar_prod_cons`, `_set_temp`, and `main.datetime` patched (`fake_datetime` pins `datetime.now`), and returns the mocks. Reuse the same `data` across calls to test multi-cycle behavior.
+- `ScheduleFileMixin.write_schedule` with `week()`/`season()` builds a temporary schedule YAML for `load_schedule` tests.
+- Test loggers are under `test.*`, which is silenced; use `assertLogs` to check expected errors.
+
+A few tests pin current behavior that review flagged as questionable (no-solar-data handling, intervals over 60 clamped without a warning); they're commented as such, so update them deliberately when changing that behavior.
