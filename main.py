@@ -231,10 +231,10 @@ class Data:
         self.consumption_thresh: dict = settings.get('consumption_thresh') or {}
         # When peak was last forced, which turns the compressor off
         self.last_off: datetime.datetime = datetime.datetime(1900, 1, 1)
-        self.min_comp_time_s = _seconds_setting(settings, 'min_comp_time_s', 300.0)
+        self.min_comp_off_time_s = _seconds_setting(settings, 'min_comp_off_time_s', 300.0)
         # When the compressor was first seen running, or None if it is off
         self.on_since: Optional[datetime.datetime] = None
-        self.min_on_time_s = _seconds_setting(settings, 'min_on_time_s', 300.0)
+        self.min_comp_on_time_s = _seconds_setting(settings, 'min_comp_on_time_s', 300.0)
         # Whether the last setpoint sent was a peak override
         self.at_peak = False
         self.solar_failing = False
@@ -333,17 +333,17 @@ def thermo_task(data: Data):
             data.log.debug(f'no {mode_str} peak temp set, ignoring peak period')
         elif is_peak:
             off_s = int((now - data.last_off).total_seconds())
-            if off_s < data.min_comp_time_s:
+            if off_s < data.min_comp_off_time_s:
                 data.log.info(
-                    f'compressor off for {off_s} < {data.min_comp_time_s}, staying at peak temp: {peak_temp}')
+                    f'compressor off for {off_s} < {data.min_comp_off_time_s}, staying at peak temp: {peak_temp}')
                 new_sched['temp'] = peak_temp
                 at_peak = True
             else:
                 reason = _peak_reason(data, mode_str, is_on, solar)
                 on_s = int((now - data.on_since).total_seconds()) if is_on else None
                 # Don't cut a compressor off right after it starts, unless it started at the peak temp
-                if reason and is_on and not data.at_peak and on_s < data.min_on_time_s:
-                    data.log.info(f'{reason}, but compressor on for {on_s} < {data.min_on_time_s}, '
+                if reason and is_on and not data.at_peak and on_s < data.min_comp_on_time_s:
+                    data.log.info(f'{reason}, but compressor on for {on_s} < {data.min_comp_on_time_s}, '
                                   f'staying at schedule temp: {new_sched["temp"]}')
                 elif reason:
                     data.log.info(f'{reason}, changing to peak temp: {peak_temp}')

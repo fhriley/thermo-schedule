@@ -32,7 +32,7 @@ COOL_OFF_PEAK_TEMP = 284
 HEAT_OFF_PEAK_TEMP = 212
 
 THRESHOLDS = {'solar_prod_thresh': {'heat': 1.0, 'cool': 4.0}, 'consumption_thresh': {'heat': -1.0, 'cool': -1.0},
-              'min_comp_time_s': 300}
+              'min_comp_off_time_s': 300}
 
 
 def make_data(settings_overrides=None):
@@ -369,13 +369,13 @@ class TestThermoTaskPeak(TestCase):
         # Default solar threshold is 100 kW, so 10 kW of production still forces peak
         cooltemp, data = self._run(PEAK_NOW, last_off=datetime(1900, 1, 1), settings_overrides={})
         self.assertEqual(cooltemp, COOL_PEAK_TEMP)
-        self.assertEqual(data.min_comp_time_s, 300.0)
+        self.assertEqual(data.min_comp_off_time_s, 300.0)
 
     def test_null_thresholds_use_defaults(self):
-        overrides = {'solar_prod_thresh': None, 'consumption_thresh': None, 'min_comp_time_s': None}
+        overrides = {'solar_prod_thresh': None, 'consumption_thresh': None, 'min_comp_off_time_s': None}
         cooltemp, data = self._run(PEAK_NOW, last_off=datetime(1900, 1, 1), settings_overrides=overrides)
         self.assertEqual(cooltemp, COOL_PEAK_TEMP)
-        self.assertEqual(data.min_comp_time_s, 300.0)
+        self.assertEqual(data.min_comp_off_time_s, 300.0)
 
     def test_compressor_that_just_started_is_not_cut_off(self):
         cooltemp, data = self._run(PEAK_NOW, last_off=datetime(1900, 1, 1), solar_prod=3.0, consumption=5.0,
@@ -390,13 +390,13 @@ class TestThermoTaskPeak(TestCase):
         self.assertTrue(data.at_peak)
 
     def test_zero_min_on_time_disables_it(self):
-        overrides = dict(THRESHOLDS, min_on_time_s=0)
+        overrides = dict(THRESHOLDS, min_comp_on_time_s=0)
         cooltemp, _ = self._run(PEAK_NOW, last_off=datetime(1900, 1, 1), solar_prod=3.0, consumption=5.0,
                                 thermo_state=2, on_for=timedelta(0), settings_overrides=overrides)
         self.assertEqual(cooltemp, COOL_PEAK_TEMP)
 
     def test_zero_min_comp_time_disables_hold(self):
-        overrides = dict(THRESHOLDS, min_comp_time_s=0)
+        overrides = dict(THRESHOLDS, min_comp_off_time_s=0)
         cooltemp, _ = self._run(PEAK_NOW, last_off=PEAK_NOW - timedelta(seconds=1), settings_overrides=overrides)
         self.assertEqual(cooltemp, COOL_SCHEDULE_TEMP)
 
